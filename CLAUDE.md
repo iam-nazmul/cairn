@@ -1,103 +1,145 @@
 # CLAUDE.md
 
-Working context for this repository. Read `SPEC.md` for the full design; this file is the practical guide for making changes.
+Working rules for this repository. `SPEC.md` is the design; this file is what you
+must do. Module-level guidance lives in each module's `README.md`.
 
-## What this is
-
-A memory-enabled **RAG chatbot** orchestrated as a **LangGraph** state graph. Two memory systems, kept separate on purpose:
-
-- **Checkpointer** → short-term, thread-scoped conversation state. Saved after every node, restored automatically by `thread_id`. The client sends only the new message each turn.
-- **Store** → long-term, cross-thread facts/preferences, scoped by `user_id`.
-
-Graph flow: `START → load_memory → retrieve → generate → write_memory → END`.
-
-## Stack
-
-- Python 3.11+
-- LangGraph (`StateGraph`) — orchestration
-- `langgraph-checkpoint` + `langgraph-checkpoint-sqlite` / `langgraph-checkpoint-postgres`
-- LangChain chat-model + embeddings interfaces (provider configurable)
-- Vector store with source metadata (pgvector or managed DB)
-- FastAPI (async) for the HTTP layer
-
-> Package versions are pinned in `pyproject.toml`. The checkpointer/store APIs change between LangGraph releases — **do not upgrade LangGraph without re-running the memory tests.**
-
-## Layout
+## Architecture
 
 ```
-src/
-  graph/
-    state.py        # ChatState TypedDict + reducers
-    nodes.py        # load_memory, retrieve, generate, write_memory
-    build.py        # StateGraph wiring + compile()
-  memory/
-    checkpointer.py # backend factory (memory | sqlite | postgres)
-    store.py        # long-term store factory
-  rag/
-    retrieve.py     # embedding + similarity search
-    prompts.py      # prompt assembly
-  api/
-    routes.py       # /chat, /threads, /health
-  config.py         # env-driven settings
-tests/
+ POST /chat                ┌─ LangGraph app ─────────────────────────────────┐
+ {user_id,                 │                                                 │
+  thread_id,  ──────────▶  │   START                                         │
+  message}                 │     │                                           │
+                           │     ▼                                           │
+                           │  load_memory ◀────────┐                         │
+                           │     │                 │                         │
+                           │     ▼                 │                         │
+   VectorStore (seam) ───▶ │  retrieve ◀──┐        │                         │
+                           │     │        │        │                         │
+                           │     ├─ agent ┴ research (rewrite query, search   │
+                           │     │          again, merge) -- chat never loops │
+                           │     │ └─ empty/weak ──┼──────┐                  │
+                           │     ▼                 │      ▼                  │
+   ChatModel (seam) ─────▶ │  generate             │   clarify               │
+                           │     │ └─ uncited ─────┼──────┘  │               │
+                           │     ▼                 │         │               │
+                           │  write_memory ────────┘◀────────┘               │
+                           │     │                                           │
+                           │    END                                          │
+                           └─────┼───────────────────────┼───────────────────┘
+                                 │                       │
+                    after every node                  read/write
+                                 ▼                       ▼
+                    ┌────────────────────┐   ┌──────────────────────────┐
+                    │   CHECKPOINTER     │   │         STORE            │
+                    │   short-term       │   │         long-term        │
+                    │   key: thread_id   │   │   key: user_id           │
+                    │   conversation     │   │   (user_id,"facts")      │
+                    │   history          │   │   (user_id,"preferences")│
+                    │                    │   │   (user_id,"threads")    │
+                    └────────────────────┘   └──────────────────────────┘
+                       ENV=dev    in-memory        in-memory
+                       ENV=local  SQLite           in-memory
+                       ENV=prod   Postgres ◀── same DATABASE_URL ──▶ Postgres
 ```
+
+Two memory systems, deliberately separate. Conversation history is restored by
+`thread_id`; durable user facts are scoped to `user_id` and cross threads.
 
 ## Commands
 
 ```bash
-# setup
-uv sync                       # or: pip install -e ".[dev]"
-cp .env.example .env          # set LLM/embeddings keys, DB URLs, ENV
+uv sync --extra dev
+cp .env.example .env
 
-# run
-uv run uvicorn src.api.routes:app --reload
+uv run uvicorn src.api.routes:app --reload     # ENV picks the backend
+docker compose up --build                      # API + Postgres
 
-# quality gates (run before committing)
-uv run pytest                 # tests
-uv run ruff check .           # lint
-uv run ruff format .          # format
-uv run mypy src               # types
+uv run pytest                                  # gates -- all four must pass
+uv run ruff check .
+uv run ruff format .
+uv run mypy src
 ```
 
-`ENV` selects the checkpointer backend: `dev` → in-memory, `local` → SQLite, `prod` → Postgres. Graph code is identical across all three; only the backend instance differs.
+Full suite, including the opt-in Postgres and Ollama tests:
 
-## How the graph works
+```bash
+docker compose up -d
+POSTGRES_TEST_URI=postgresql://cairn:cairn@localhost:5433/cairn?sslmode=disable \
+  CAIRN_TEST_OLLAMA=1 uv run pytest
+```
 
-- **State** lives in `graph/state.py`. `messages` uses the **add-messages reducer** — nodes *append*, they never overwrite the list. Other fields (`question`, `retrieved`, `long_term_facts`, `answer`) are set per turn.
-- **Invocation always passes `thread_id` in config and `user_id` in context:**
-  ```python
-  config = {"configurable": {"thread_id": thread_id}}
-  await graph.ainvoke({"messages": [{"role": "user", "content": text}], "question": text},
-                      config, context=Context(user_id=user_id))
-  ```
-  `user_id` moved out of `configurable` into `context=` in current LangGraph; see
-  `.claude/references/langgraph-current-api.md`.
-  Same `thread_id` = same restored conversation. Different `thread_id` = isolated. **Never** invoke without a `thread_id` — memory silently won't persist.
-- **Compile** with both systems: `builder.compile(checkpointer=checkpointer, store=store)`.
+## Rules
 
-## Conventions
+**Invocation**
+- Always pass `thread_id` in `config["configurable"]`. Never invoke without one —
+  memory silently fails to persist.
+- Pass `user_id` in `context=`, not in `configurable`. Read it as
+  `runtime.context.user_id`.
+- Send only the new message. Never resend history from the client.
 
-- **Adding a node:** write a pure `async def node(state, *, runtime) -> dict` (`runtime` is keyword-only; `user_id` comes from `runtime.context`) returning only the keys it changes; wire it in `graph/build.py`; never mutate `state` in place.
-- **Memory boundaries:** conversation history comes from the checkpointer — do **not** hand-roll a history table or make the client resend past turns. Durable user facts go through `memory/store.py`, never into the checkpointed `messages`.
-- **Retrieval:** `retrieve` must return `{text, source, score}` per chunk so `generate` can cite. Answers without citations are a bug.
-- **Grounding:** `generate` answers from retrieved context + history + long-term facts. Do not let it fall back to model priors when retrieval is empty — route to a clarify/no-answer path instead (see SPEC §6.3).
-- **Context budget:** cap retrieved-context size and trim/summarize long threads before the LLM call. Long threads overflowing the window is a known risk (SPEC §11).
-- **Async:** API and I/O-bound nodes are async. Keep blocking calls out of the request path.
+**State**
+- Return only the keys your node changes. Never mutate `state` in place.
+- Return `{"messages": [new_msg]}` to append. Returning the whole list overwrites
+  and breaks the reducer.
 
-## Testing
+**Memory boundaries**
+- Conversation history → checkpointer. Durable user facts → Store. Never cross them.
+- Build Store namespaces from `runtime.context.user_id` only, never a request field.
+- Add a new place user data lands → add it to `USER_NAMESPACES` in
+  `src/memory/threads.py`, or deletion silently becomes partial.
 
-- Unit-test each node in isolation with a fabricated `ChatState`.
-- **Memory tests are the critical ones:** invoke twice on the same `thread_id` and assert the second turn sees the first (e.g. "My name is Alice" → "What's my name?"). Assert two different `thread_id`s stay isolated. Run these against SQLite *and* Postgres backends.
-- Add a grounding/citation eval: verify answers reference retrieved chunks, not priors.
+**Retrieval and grounding**
+- `retrieve` must return `{text, source, score}` per chunk.
+- An answer that cites nothing must never ship as grounded. Empty or weak
+  retrieval routes to `clarify`, never to model priors.
+- Streaming does not exempt anything from that: `generate` streams before the
+  citation gate runs, so a `generate → clarify` switch must emit `restart` and
+  the client must discard the draft. Filter streamed tokens to the `generate` and
+  `clarify` nodes — `write_memory` calls a model too.
+- Keep `POST /chat/stream` and `POST /chat` interchangeable. A test asserts they
+  return the same answer and citations; do not let one grow behaviour.
+- Agent mode changes how evidence is gathered, never what may be answered. The
+  `RETRIEVAL_MIN_SCORE` floor and the citation requirement are identical in both
+  modes; a test pins that. Cap extra searches with `AGENT_MAX_SEARCHES` — each one
+  is a model call.
+- `mode` goes in `context=` beside `user_id`, never in `configurable`. It is per
+  turn: one thread may mix both.
 
-## Don't
+**Dependencies**
+- Do not bump `langgraph` or any `langgraph-checkpoint-*` package without
+  re-running `tests/test_memory.py` against SQLite **and** Postgres. The
+  checkpointer APIs change between releases.
 
-- Don't remove `thread_id` from invocation config.
-- Don't overwrite `messages` (respect the reducer).
-- Don't store long-term facts in the checkpointed conversation state, or conversation history in the Store.
-- Don't bump the LangGraph version casually — pin and test.
-- Don't leak state across users/threads; deletion of a user's threads and facts must stay supported (right-to-be-forgotten).
+**Writing code here**
+- Keep comments minimal. One line for a non-obvious *why*; nothing that restates
+  the code. Long rationale belongs in the module README.
+- In docstrings on an implementation, point at the parent/protocol method
+  (`See VectorStore.search.`) instead of restating its contract.
+- Nodes that do I/O are `async`. Keep blocking calls off the request path.
 
-## Open decisions
+## Where things live
 
-Tracked in `SPEC.md` §11 — how long-term facts get extracted in `write_memory`, and whether the Store reuses the checkpointer's Postgres (pgvector) or a separate vector DB. Confirm these before building M3.
+| Path | What | Read before changing |
+|---|---|---|
+| `src/graph/` | State, nodes, wiring | [src/graph/README.md](src/graph/README.md) |
+| `src/memory/` | Checkpointer, Store, facts, deletion | [src/memory/README.md](src/memory/README.md) |
+| `src/rag/` | Retrieval, prompts, LLM seam | [src/rag/README.md](src/rag/README.md) |
+| `src/api/` | HTTP layer, streaming, browser UI | [src/api/README.md](src/api/README.md) |
+| `.claude/references/` | Verified LangGraph API, memory placement | — |
+
+## Gotchas
+
+- `ruff format .` formats Python inside Markdown. `*.md` is excluded in
+  `pyproject.toml`; do not remove that exclusion.
+- LangGraph declares `runtime` **keyword-only**: `async def node(state, *, runtime)`.
+- Ollama binds to `127.0.0.1`, so containers cannot reach it. Either rebind it
+  (`OLLAMA_HOST=0.0.0.0:11434`, needs root) or overlay
+  [docker-compose.host-net.yml](docker-compose.host-net.yml) on Linux.
+- `OLLAMA_BASE_URL` in `.env` is for host runs only. Compose reads `.env` for
+  `${VAR}`, so it takes its override from `DOCKER_OLLAMA_BASE_URL` instead —
+  otherwise the host value aims the container at itself.
+- `caplog.set_level` makes logging tests pass even when nothing configures
+  logging. Assert against the real path (`configure_logging`).
+- `/health` must stay 200 when `llm_reachable` is false. Compose health-checks it;
+  failing it when the model is down restart-loops a healthy API.

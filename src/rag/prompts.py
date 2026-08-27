@@ -1,9 +1,4 @@
-"""Prompt assembly: system instructions + long-term facts + retrieved context.
-
-Also owns the citation contract. `generate` emits `[S1]`-style markers; those
-markers are mapped back onto the retrieved chunks they refer to, which is how
-/chat builds its `citations` array (SPEC §9) without adding a field to ChatState.
-"""
+"""Prompt assembly and the citation-marker contract."""
 
 from __future__ import annotations
 
@@ -37,6 +32,43 @@ the user -- that is remembered context, not a guess. Otherwise, ask the user one
 short clarifying question."""
 
 
+REFINE_SYSTEM = """You are refining a search query against a document index.
+
+You will see the user's question, the queries already tried, and what those \
+returned. Write ONE new search query that is likely to surface what is still \
+missing -- different wording, a narrower aspect, or a term the documents would \
+use rather than the user's phrasing.
+
+Output the query alone: no quotes, no explanation, no prefix."""
+
+_MAX_QUERY_CHARS = 200
+
+
+def build_refine_prompt(question: str, tried: list[str], chunks: list[RetrievedChunk]) -> str:
+    found = (
+        "\n".join(f"- {c['source']} (score {c['score']}): {c['text'][:200]}" for c in chunks)
+        or "- nothing yet"
+    )
+    return f"Question: {question}\n\nQueries tried:\n" + (
+        "\n".join(f"- {t}" for t in tried) + f"\n\nFound so far:\n{found}"
+    )
+
+
+def parse_refined_query(reply: str, question: str, tried: list[str]) -> str:
+    """First usable line of the model's answer, or the question as a fallback.
+
+    A model that ignores the format is common; an unusable query is not a failure
+    worth aborting the turn for, because a repeated search simply adds no new
+    sources and the router stops on its own.
+    """
+    seen = {t.strip().lower() for t in tried}
+    for line in reply.splitlines():
+        candidate = line.strip().strip("\"'`").removeprefix("Query:").strip()
+        if candidate and len(candidate) <= _MAX_QUERY_CHARS and candidate.lower() not in seen:
+            return candidate
+    return question
+
+
 def format_facts(facts: list[str]) -> str:
     if not facts:
         return "Known facts about the user: (none on file)"
@@ -45,12 +77,7 @@ def format_facts(facts: list[str]) -> str:
 
 
 def format_context(chunks: list[RetrievedChunk], max_chars: int) -> str:
-    """Render chunks as numbered, citable blocks, capped at `max_chars`.
-
-    The cap is the retrieved-context half of the SPEC §10 cost control: chunks are
-    dropped whole, lowest-ranked first, so a citation marker never points at a
-    block that was truncated away.
-    """
+    """Render chunks as numbered, citable blocks, capped at `max_chars`."""
     if not chunks:
         return "Retrieved context: (nothing retrieved)"
 
@@ -82,19 +109,10 @@ def build_system_prompt(
 def assemble_messages(
     state: ChatState, system: str, max_history_tokens: int | None = None
 ) -> list[AnyMessage]:
-    """System prompt + checkpointed history (which already ends with this turn).
-
-    History comes from the checkpointer via `state["messages"]` -- never from the
-    client and never from a hand-rolled table (CLAUDE.md memory boundaries).
-
-    Long threads are trimmed to `max_history_tokens` before the model call: the
-    oldest turns are dropped, the newest kept. Nothing is deleted from the
-    checkpoint -- the full thread is still there, and /threads/{id}/history still
-    returns all of it. This is the SPEC §11 context-overflow mitigation.
-    """
+    """System prompt + checkpointed history, trimmed to `max_history_tokens`."""
     history: list[AnyMessage] = list(state.get("messages") or [])
     if not history:
-        # Defensive: a node unit-tested with a bare state still gets the question.
+        # A node unit-tested with a bare state still gets the question.
         history = [HumanMessage(content=state["question"])]
 
     if max_history_tokens is not None:
@@ -107,8 +125,7 @@ def assemble_messages(
             include_system=False,
             allow_partial=False,
         )
-        # trim_messages can return nothing if a single turn blows the budget;
-        # the current question must always survive.
+        # trim_messages can return nothing if one turn blows the budget.
         history = cast(list[AnyMessage], list(trimmed)) or history[-1:]
 
     return [SystemMessage(content=system), *history]

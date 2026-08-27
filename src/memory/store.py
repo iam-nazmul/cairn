@@ -1,8 +1,4 @@
-"""Store factory -- long-term, cross-thread memory scoped by `user_id` (SPEC §7.2).
-
-ENV=prod reuses the checkpointer's Postgres rather than a separate vector DB
-(SPEC §11, resolved in M3).
-"""
+"""Store factory: long-term memory scoped by `user_id` (SPEC §7.2)."""
 
 from __future__ import annotations
 
@@ -25,9 +21,7 @@ async def store_scope(settings: Settings) -> AsyncIterator[BaseStore]:
     if not settings.database_url:
         raise ValueError("DATABASE_URL is required when ENV=prod")
 
-    # The SAME database as the checkpointer (SPEC §11, resolved in M3): one URL,
-    # one credential, one backup story, and deletion that spans both memory
-    # systems in one place.
+    # The SAME database as the checkpointer (SPEC §11): one URL, one deletion path.
     async with AsyncPostgresStore.from_conn_string(settings.database_url) as store:
         await store.setup()  # idempotent; creates the store tables
         yield store

@@ -1,15 +1,4 @@
-"""Thread index and user deletion (SPEC §10 right-to-be-forgotten).
-
-The checkpointer is keyed by `thread_id` alone -- checkpoint metadata carries no
-`user_id`, so there is no way to ask it "which threads belong to this user?".
-Deleting a user therefore needs an index, kept in the Store under
-`(user_id, "threads")`.
-
-This is NOT conversation history in the Store (which would violate the memory
-boundaries in .claude/references/memory-placement.md): it holds thread *ids*, no
-message content. It exists so that deletion can be complete and verifiable, which
-is the whole point of §10.
-"""
+"""Thread index and user deletion (SPEC §10)."""
 
 from __future__ import annotations
 
@@ -23,8 +12,7 @@ from src.memory.facts import FACTS_NS, PREFERENCES_NS
 
 THREADS_NS = "threads"
 
-# Every namespace a user's data can land in. Adding a third place user data goes
-# means adding it here, or deletion silently becomes partial.
+# Every namespace user data lands in. Miss one and deletion becomes partial.
 USER_NAMESPACES = (FACTS_NS, PREFERENCES_NS, THREADS_NS)
 
 _PAGE = 1000
@@ -56,17 +44,32 @@ async def list_threads(store: BaseStore, user_id: str) -> list[str]:
     return sorted(str(item.value["thread_id"]) for item in items)
 
 
+async def forget_thread(
+    store: BaseStore, checkpointer: BaseCheckpointSaver[Any], user_id: str, thread_id: str
+) -> bool:
+    """Delete one conversation. False if it is not this user's.
+
+    The ownership check is the point: checkpoints are keyed by `thread_id` alone
+    and carry no `user_id`, so without consulting this user's index any caller
+    could delete any conversation by guessing its id.
+
+    Durable facts are deliberately untouched -- they belong to the user, not to
+    the conversation they were learned in. `forget_user` is what erases those.
+    """
+    if thread_id not in await list_threads(store, user_id):
+        return False
+
+    await checkpointer.adelete_thread(thread_id)
+    # Also drop the index entry, or forget_user later counts a thread that is
+    # already gone and reports a deletion it did not make.
+    await store.adelete((user_id, THREADS_NS), thread_id)
+    return True
+
+
 async def forget_user(
     store: BaseStore, checkpointer: BaseCheckpointSaver[Any], user_id: str
 ) -> DeletionReport:
-    """Delete everything belonging to a user, across BOTH memory systems.
-
-    1. every checkpoint for every thread the user owns, and
-    2. every Store namespace scoped to that user.
-
-    Other users' data is untouched: every key is reached through a namespace built
-    from this `user_id`.
-    """
+    """Delete every checkpoint and Store entry belonging to `user_id`."""
     threads = await list_threads(store, user_id)
     for thread_id in threads:
         await checkpointer.adelete_thread(thread_id)

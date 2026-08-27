@@ -1,13 +1,4 @@
-"""Checkpointer factory -- short-term, thread-scoped memory (SPEC §7.1).
-
-`ENV` selects the backend and NOTHING outside this module (and store.py) is
-allowed to branch on it: graph code is identical across all three backends, only
-the instance handed to `compile()` differs.
-
-Exposed as an async context manager because the durable savers are context
-managers whose connection closes on exit -- build the graph inside the scope and
-keep it there (FastAPI: the lifespan handler).
-"""
+"""Checkpointer factory. ENV selects the backend; nothing else branches on it."""
 
 from __future__ import annotations
 
@@ -30,8 +21,7 @@ async def checkpointer_scope(settings: Settings) -> AsyncIterator[BaseCheckpoint
         return
 
     if settings.env == "local":
-        # from_conn_string yields inside the context manager and closes the
-        # connection on exit -- build AND invoke the graph inside this scope.
+        # The connection closes on exit: build AND invoke inside this scope.
         async with AsyncSqliteSaver.from_conn_string(settings.sqlite_path) as saver:
             await saver.setup()  # idempotent; creates the checkpoint tables
             yield saver

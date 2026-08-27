@@ -11,7 +11,7 @@ from langgraph.runtime import Runtime
 from langgraph.store.base import BaseStore
 from langgraph.store.memory import InMemoryStore
 
-from src.config import Context, Settings
+from src.config import Context, Mode, Settings
 from src.graph.build import build_graph
 from src.graph.state import ChatState
 
@@ -31,9 +31,11 @@ def context() -> Context:
     return Context(user_id="u-test")
 
 
-def make_runtime(user_id: str = "u-test", store: BaseStore | None = None) -> Runtime[Context]:
-    """A stub Runtime for unit-testing a node in isolation."""
-    return Runtime(context=Context(user_id=user_id), store=store)
+def make_runtime(
+    user_id: str = "u-test", store: BaseStore | None = None, mode: Mode = "chat"
+) -> Runtime[Context]:
+    """A stub Runtime for unit-testing a node or a router in isolation."""
+    return Runtime(context=Context(user_id=user_id, mode=mode), store=store)
 
 
 def make_state(**overrides: Any) -> ChatState:
@@ -44,6 +46,8 @@ def make_state(**overrides: Any) -> ChatState:
         "retrieved": [],
         "long_term_facts": [],
         "answer": "",
+        "searches": [],
+        "new_hits": 0,
     }
     base.update(overrides)
     return ChatState(**base)  # type: ignore[typeddict-item]

@@ -9,11 +9,7 @@ from langgraph.graph.message import add_messages
 
 
 class RetrievedChunk(TypedDict):
-    """One retrieved chunk. `source` and `score` are what make citation possible.
-
-    CLAUDE.md: retrieve MUST return {text, source, score} per chunk so that
-    generate can cite. An answer without citations is a bug.
-    """
+    """One retrieved chunk. `source` and `score` are what make citation possible."""
 
     text: str
     source: str
@@ -21,17 +17,16 @@ class RetrievedChunk(TypedDict):
 
 
 class ChatState(TypedDict):
-    """Graph state.
-
-    `messages` uses the add-messages reducer: nodes return the NEW messages only
-    and LangGraph appends them. Returning the whole list overwrites history and
-    breaks the reducer -- the bug CLAUDE.md calls out explicitly.
-
-    Every other field is per-turn and overwrites.
-    """
+    """Graph state. `messages` appends via its reducer; every other field overwrites."""
 
     messages: Annotated[list[AnyMessage], add_messages]
     question: str
     retrieved: list[RetrievedChunk]
     long_term_facts: list[str]
     answer: str
+    # Agent mode (SPEC §13.2). Every query tried this turn, oldest first;
+    # its length is the search budget spent.
+    searches: list[str]
+    # Sources the most recent search added that earlier ones had not. Zero means
+    # refining stopped paying for itself, which is a reason to stop.
+    new_hits: int

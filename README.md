@@ -1,185 +1,200 @@
 # cairn
 
-A memory-enabled **RAG chatbot** orchestrated as a **LangGraph** state graph.
+A chatbot that answers questions from your own documents, **cites where each
+answer came from**, and remembers you between conversations.
 
-**[`SPEC.md`](SPEC.md) is the design document** — architecture, memory model, API
-surface and milestones. **[`CLAUDE.md`](CLAUDE.md)** is the working guide for
-making changes. Read SPEC.md first.
+- Ask a question, get an answer grounded in the knowledge base with sources
+  attached. If nothing relevant is found, it says so instead of guessing.
+- Pick up a conversation where you left off — days later, after a restart.
+- Tell it something durable ("my preferred language is Bengali") and it still
+  knows in a brand-new conversation.
+- Ask it to forget you, and it deletes everything.
 
-## The one idea
+Runs entirely on your own machine against a local LLM, or against a hosted
+provider if you prefer.
 
-Two memory systems, deliberately kept separate:
+## Quick start
 
-| Concern | Mechanism | Scope |
-|---|---|---|
-| Conversation history | **Checkpointer** | per `thread_id` |
-| Durable user facts | **Store** | per `user_id`, across threads |
+```bash
+docker compose up --build
+```
 
-The client sends only the new message each turn; prior turns are restored from
-the checkpoint by `thread_id`.
+Then open **<http://localhost:8000>** and ask it something.
 
-## Setup
+That starts the API on port 8000 and its database. The language model comes from
+[Ollama](https://ollama.com) running on your machine:
+
+```bash
+ollama pull llama3.1
+```
+
+Ollama listens only on `127.0.0.1` by default, which the container cannot reach —
+if you skip this, every answer fails and the status dot in the sidebar turns
+amber. Allow it once:
+
+```bash
+sudo systemctl edit ollama     # [Service]
+                               # Environment="OLLAMA_HOST=0.0.0.0:11434"
+sudo systemctl restart ollama
+```
+
+Prefer not to touch your Ollama setup? On **Linux**, run the API in the host's
+network namespace instead — then its `localhost` is your `localhost`, and the
+default `127.0.0.1` bind is reached with no root and no edit:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.host-net.yml up --build
+```
+
+Put this in your `.env` and plain `docker compose up` does it for you — worth
+doing, because a plain `up` otherwise recreates the container on bridge
+networking and every answer starts failing again:
+
+```bash
+COMPOSE_FILE=docker-compose.yml:docker-compose.host-net.yml
+```
+
+(Linux only: on Docker Desktop the "host" is a VM, so it buys nothing. The
+container also stops being isolated from your network.)
+
+Failing that, `docker compose --profile ollama up --build` runs the model inside
+Docker instead (it re-downloads the models), or `LLM_PROVIDER=fake docker compose
+up --build` starts everything with a canned stand-in model, which is enough to
+try the endpoints.
+
+`OLLAMA_BASE_URL` in `.env` applies only when you run the app directly on your
+machine. Docker needs a different address — `localhost` inside a container means
+the container — so Compose passes its own and takes overrides from
+`DOCKER_OLLAMA_BASE_URL`. `docker compose config` shows what the container gets.
+
+Running without Docker:
 
 ```bash
 uv sync --extra dev
 cp .env.example .env
+uv run uvicorn src.api.routes:app --reload
 ```
 
-The default `.env` points at a local **Ollama** server:
+## In the browser
+
+<http://localhost:8000> is a chat window over the same API. Answers stream in as
+the model writes them — formatted, so lists, bold and code blocks read as such
+rather than as raw asterisks — with the sources each one used listed underneath.
+
+- **Conversations** in the sidebar. Pick one up where you left it — the history
+  is restored from the checkpoint, not from anything the browser kept. The bin
+  icon deletes one: its messages go, what cairn remembers about you stays.
+- **What cairn remembers** lists the durable facts on file for you. Say *"my
+  preferred language is Bengali"* and watch it appear, then start a brand-new
+  conversation and see it still there.
+- **Signed in as** is the `user_id`. Change it and you get a different person's
+  conversations and a different set of remembered facts.
+- **Forget me** erases both, and tells you how much it deleted.
+
+An answer with no sources under it was not drawn from your documents — the UI
+says so rather than letting it pass as grounded.
+
+Every answer has a **Copy** button, and every code block a **Copy** and a
+**Download**. Copying gives you the Markdown behind the answer rather than the
+formatted text, so it pastes into a document or an editor unchanged.
+
+### Chat or Agent
+
+Above the message box are two modes. They change how hard cairn looks for
+evidence — never how freely it answers.
+
+| | What it does | Good for |
+|---|---|---|
+| **Chat** | Searches your documents once, then answers. | Most questions. Fast, one model call. |
+| **Agent** | Searches, reads what came back, rewrites the query and searches again, then answers from everything it gathered. | Vague or many-sided questions where the right words are not in the question. |
+
+Agent mode shows each search as it runs, so you can see what it looked for. It
+costs an extra model call per search — `AGENT_MAX_SEARCHES` is the ceiling.
+
+Both modes obey the same rule: an answer with nothing to cite is not given. Agent
+mode looks harder, it does not guess more.
+
+The stylesheet is compiled in the browser from a CDN, so the page needs internet
+on first load even though everything else runs locally. Swapping that for a
+prebuilt file is two commands: see [src/api/README.md](src/api/README.md).
+
+## Talking to it directly
+
+Start a conversation, then send messages to it. You only ever send the newest
+message — earlier turns are remembered for you.
 
 ```bash
-ollama serve            # if it is not already running
-ollama pull llama3.1    # LLM_MODEL
+THREAD=$(curl -s -X POST localhost:8000/threads | jq -r .thread_id)
+
+curl -s localhost:8000/chat -H 'content-type: application/json' -d "{
+  \"user_id\": \"u_123\",
+  \"thread_id\": \"$THREAD\",
+  \"message\": \"How long do I have to submit an expense report?\"
+}" | jq
 ```
 
-Set `LLM_MODEL` to any model you have pulled (`ollama ls`). Note that thinking
-models such as `qwen3` emit their reasoning inline unless configured otherwise,
-which shows up in the answer text.
-
-Tests never touch Ollama: they set `LLM_PROVIDER=fake` explicitly, so the gates
-stay offline and deterministic. To exercise a real model:
-
-```bash
-CAIRN_TEST_OLLAMA=1 uv run pytest -m ollama
+```json
+{
+  "answer": "According to [S2], you have up to 30 days from the purchase date...",
+  "citations": [{ "source": "doc://kb/expenses-1", "score": 0.2 }],
+  "thread_id": "t_c1c068f2c495"
+}
 ```
 
-## Running it
+`[S2]` in the answer refers to the second retrieved source. `citations` lists
+only the sources the answer actually used, so an empty list means the reply was
+not drawn from your documents.
 
-```bash
-ENV=local uv run uvicorn src.api.routes:app --reload
-```
-
-`ENV` selects the backend: `dev` → in-memory (resets on restart), `local` →
-SQLite at `SQLITE_PATH`, `prod` → Postgres at `DATABASE_URL`. The graph code is
-identical across all three.
-
-For `prod`, one Postgres backs **both** the checkpointer and the Store (SPEC §11):
-
-```bash
-docker compose up -d        # pgvector/pgvector:pg16 on :5433
-ENV=prod uv run uvicorn src.api.routes:app
-```
-
-| Endpoint | Purpose |
+| Endpoint | What it does |
 |---|---|
-| `POST /chat` | One turn. Send **only** the new message — prior turns come from the checkpoint. |
-| `POST /threads` | Mint a new `thread_id`. |
-| `GET /threads/{id}/history` | Checkpointed history for a thread. |
-| `DELETE /users/{user_id}` | Right to be forgotten: every thread **and** every stored fact. |
-| `GET /health` | Liveness, plus the active backend and provider. |
+| `POST /threads` | Start a conversation and get its id |
+| `POST /chat` | Send one message and get an answer with citations |
+| `POST /chat/stream` | The same, streamed back as the answer is written |
+| `GET /threads/{id}/history` | Everything said in a conversation |
+| `GET /users/{user_id}/threads` | A user's conversations |
+| `GET /users/{user_id}/facts` | What is remembered about a user |
+| `DELETE /users/{user_id}/threads/{id}` | Erase one conversation, keeping remembered facts |
+| `DELETE /users/{user_id}` | Erase a user: every conversation and every remembered fact |
+| `GET /health` | Check it is running |
 
-```bash
-curl -s localhost:8000/chat -H 'content-type: application/json' \
-  -d '{"user_id":"u_1","thread_id":"t_1","message":"How long do I have to submit an expense report?"}'
-```
+## What it remembers
 
-## Quality gates
+Two different things, on purpose:
 
-```bash
-uv run pytest
-uv run ruff check .
-uv run ruff format .
-uv run mypy src
-```
+- **A conversation** is remembered by its `thread_id`. Different conversation,
+  clean slate.
+- **Durable facts about you** are remembered by `user_id` and follow you into
+  every new conversation. It picks these up when you say things like *"my
+  preferred language is Bengali"* or *"remember that I work in accounts payable"*.
 
-`pytest` alone skips the two opt-in suites. To run everything:
-
-```bash
-docker compose up -d
-POSTGRES_TEST_URI=postgresql://cairn:cairn@localhost:5433/cairn?sslmode=disable \
-  CAIRN_TEST_OLLAMA=1 uv run pytest
-```
-
-## Deleting a user (SPEC §10)
+Deleting a user removes both:
 
 ```bash
 curl -X DELETE localhost:8000/users/u_123
 # {"user_id":"u_123","threads_deleted":2,"facts_deleted":1}
 ```
 
-Deletion spans **both** memory systems: every checkpoint for every thread the user
-owns, and every Store namespace scoped to them. The checkpointer is keyed by
-`thread_id` alone and its metadata carries no `user_id`, so a thread index is kept
-in the Store under `(user_id, "threads")` — thread ids only, no message content.
-Adding a third place user data lands means adding it to `USER_NAMESPACES`, or
-deletion silently becomes partial. A test asserts that list stays complete.
+## Your documents
 
-## Observability
+This build ships with a handful of sample documents so it works out of the box.
+Connecting it to a real document collection is an integration step — see
+[src/rag/README.md](src/rag/README.md).
 
-Every node logs its duration, retrieval hits and scores, facts loaded, and
-approximate answer tokens, tagged with `thread_id`:
+## Configuring
 
-```
-node=retrieve thread=t_abc ms=0.4 hits=2 doc://kb/expenses-2=0.4 doc://kb/expenses-1=0.2
-node=generate thread=t_abc ms=1412.7 answer_tokens~24
-```
+Everything is set through environment variables, documented with defaults in
+[`.env.example`](.env.example). The ones most worth knowing:
 
-## Status
-
-| Milestone | State |
-|---|---|
-| M1 — skeleton: `retrieve → generate`, in-memory checkpointer, cited answers | done |
-| M2 — short-term memory: SQLite checkpointer, `/chat` + threads endpoints | done |
-| M3 — long-term memory: Store, `load_memory` / `write_memory` | done |
-| M4 — hardening: Postgres, observability, trimming, deletion APIs | done |
-
-## How a turn is routed
-
-```
-START → load_memory → retrieve → generate ──────→ write_memory → END
-                          │          │ (uncited)       ▲
-                          └────────→ clarify ──────────┘
-```
-
-`retrieve` searches the question directly; if that comes back empty or weak it
-retries with recent user turns folded in, so a follow-up like *"and when do I get
-the money back?"* still finds the right documents (SPEC §6.2's "history-rewritten
-query").
-
-Two routes lead to `clarify`, the no-answer path: retrieval found nothing usable,
-or `generate` produced an answer it could not cite. An uncited answer is never
-returned as grounded — it is dropped and the turn is re-answered without sources,
-rather than presenting model priors as knowledge.
-
-## Long-term memory
-
-`load_memory` reads this user's durable facts from the Store; `write_memory`
-upserts new ones after the answer. Namespaces are `(user_id, "facts")` and
-`(user_id, "preferences")`, built from the authenticated `user_id` only.
-
-Extraction is **deterministic by default** (`MEMORY_EXTRACTION=rules`): explicit
-`remember that …` commands plus first-person patterns (`my <attribute> is <value>`,
-`I prefer …`). A bad fact is not wrong once — it is injected into every future
-prompt on every future thread for that user, so this errs towards precision. Keys
-are derived from the normalized attribute, which makes writes idempotent upserts:
-restating "my preferred language is Bengali" updates the row rather than adding a
-second one (SPEC §7.2). `MEMORY_EXTRACTION=llm` trades that for recall at the cost
-of a model call on every turn's write path; `off` disables writes.
-
-Semantic lookup over facts (SPEC §7.2's SHOULD) lands in M4 with the pgvector
-store; today the fact set is small and bounded, so `load_memory` lists it.
-
-### Which memory does this belong to?
-
-| Data | Home | Crosses threads? |
+| Variable | Default | Purpose |
 |---|---|---|
-| "We were discussing invoice 42" | Checkpointer | no |
-| "My preferred language is Bengali" | Store | yes, same user only |
+| `LLM_MODEL` | `llama3.1` | Any model you have pulled (`ollama ls`) |
+| `ENV` | `dev` | `dev` forgets on restart; `local` and `prod` do not |
+| `MEMORY_EXTRACTION` | `rules` | `off` to stop remembering durable facts |
+| `AGENT_MAX_SEARCHES` | `3` | Searches per turn in Agent mode; `1` makes it act like Chat |
+| `LOG_LEVEL` | `INFO` | Per-request timings and retrieval scores |
 
-The tests assert both directions — a conversational probe must *not* cross
-threads, and a durable fact *must*. Using a durable fact to test thread isolation
-tests the wrong system; see `.claude/references/memory-placement.md`.
+## For developers
 
-## Seams (deliberately stubbed)
-
-Two dependencies are stubbed behind interfaces so the graph and tests run
-end-to-end without external services. Both are marked `>>> SEAM <<<` in source.
-
-- **Vector store** — `VectorStore` in [`src/rag/retrieve.py`](src/rag/retrieve.py),
-  seeded from [`src/rag/fixtures.py`](src/rag/fixtures.py). Corpus ingestion is out
-  of scope per SPEC §3; a real index implements the same protocol and must return
-  `source` and `score` so answers stay citable.
-- **Chat model** — `ChatModel` in [`src/rag/llm.py`](src/rag/llm.py). `LLM_PROVIDER=ollama`
-  talks to a local Ollama server; `fake` selects a deterministic scripted stand-in
-  so the gates run offline; any other value goes through LangChain's
-  `init_chat_model`.
+[SPEC.md](SPEC.md) is the design, [CLAUDE.md](CLAUDE.md) the working rules, and
+each module has its own guide: [graph](src/graph/README.md),
+[memory](src/memory/README.md), [rag](src/rag/README.md), [api](src/api/README.md).

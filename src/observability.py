@@ -1,13 +1,4 @@
-"""Per-node instrumentation (SPEC §10 observability).
-
-Wraps each node so every super-step logs its duration, plus the signals worth
-having when a turn goes wrong: which chunks were retrieved and at what scores,
-how many long-term facts were loaded, and the approximate token cost of the
-answer. Node code stays clean -- instrumentation is applied at wiring time.
-
-`thread_id` is included on every line so a single conversation can be followed
-through the logs.
-"""
+"""Per-node instrumentation (SPEC §10 observability)."""
 
 from __future__ import annotations
 
@@ -19,13 +10,22 @@ from langchain_core.messages.utils import count_tokens_approximately
 from langgraph.config import get_config
 from langgraph.runtime import Runtime
 
-from src.config import Context
+from src.config import Context, Settings
 from src.graph.state import ChatState
 
 if TYPE_CHECKING:
     from src.graph.nodes import Node
 
 logger = logging.getLogger("cairn.graph")
+
+
+def configure_logging(settings: Settings) -> None:
+    """Enable the `cairn` logger; without this the node logs never emit."""
+    logging.basicConfig(
+        level=logging.WARNING,
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    )
+    logging.getLogger("cairn").setLevel(settings.log_level.upper())
 
 
 def _thread_id() -> str:
