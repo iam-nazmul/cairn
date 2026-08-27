@@ -1,0 +1,289 @@
+{% extends "base.html" %}
+
+{% block body %}
+<div class="flex h-full">
+  <!-- Off-canvas below md, static from md up. -->
+  <div
+    id="scrim"
+    class="fixed inset-0 z-20 hidden bg-stone-900/40 backdrop-blur-xs md:hidden"
+  ></div>
+
+  <aside
+    id="sidebar"
+    class="fixed inset-y-0 left-0 z-30 flex w-72 -translate-x-full flex-col border-r
+           border-stone-200 bg-white transition-transform md:static md:translate-x-0
+           dark:border-stone-800 dark:bg-stone-900"
+  >
+    <div class="flex items-center gap-2 px-5 py-5">
+      <svg viewBox="0 0 24 24" class="size-6 text-cairn-600 dark:text-cairn-300" aria-hidden="true">
+        <path fill="currentColor" d="M8 19h8v2H8zM6 14h12v3H6zM8.5 9.5h7v3h-7zM10 5h4v3h-4z" />
+      </svg>
+      <span class="font-display text-xl tracking-tight">cairn</span>
+    </div>
+
+    <div class="px-5">
+      <label for="user-id" class="text-xs font-medium text-stone-500 dark:text-stone-400">
+        Signed in as
+      </label>
+      <input
+        id="user-id"
+        type="text"
+        spellcheck="false"
+        placeholder="u_123"
+        class="mt-1 w-full rounded-lg border border-stone-300 bg-stone-50 px-3 py-1.5
+               font-mono text-sm outline-none focus:border-cairn-500
+               focus:ring-2 focus:ring-cairn-500/30 dark:border-stone-700
+               dark:bg-stone-950"
+      />
+      <p class="mt-1 text-xs text-stone-500 dark:text-stone-400">
+        Durable facts follow this id into every conversation.
+      </p>
+    </div>
+
+    <button
+      id="new-thread"
+      class="mx-5 mt-4 flex items-center justify-center gap-2 rounded-lg bg-cairn-600
+             px-3 py-2 text-sm font-medium text-white hover:bg-cairn-700
+             focus:ring-2 focus:ring-cairn-500/40 focus:outline-none"
+    >
+      <span class="text-base leading-none">+</span> New conversation
+    </button>
+
+    <nav class="scroll-slim mt-6 flex-1 overflow-y-auto px-5">
+      <h2 class="text-xs font-semibold tracking-wide text-stone-500 uppercase dark:text-stone-400">
+        Conversations
+      </h2>
+      <ul id="thread-list" class="mt-2 space-y-1"></ul>
+      <p id="thread-empty" class="mt-2 text-xs text-stone-400 dark:text-stone-500">
+        None yet — a conversation appears here after its first message.
+      </p>
+
+      <h2
+        class="mt-7 text-xs font-semibold tracking-wide text-stone-500 uppercase
+               dark:text-stone-400"
+      >
+        What cairn remembers
+      </h2>
+      <ul id="fact-list" class="mt-2 space-y-1"></ul>
+      <p id="fact-empty" class="mt-2 text-xs text-stone-400 dark:text-stone-500">
+        Nothing yet — try “my preferred language is Bengali”.
+      </p>
+    </nav>
+
+    <div class="border-t border-stone-200 px-5 py-4 dark:border-stone-800">
+      <div class="flex items-center justify-between">
+        <span id="health" class="flex items-center gap-1.5 text-xs text-stone-500
+                                 dark:text-stone-400">
+          <span class="size-1.5 rounded-full bg-stone-300 dark:bg-stone-600"></span>
+          checking…
+        </span>
+        <button
+          id="theme-toggle"
+          title="Toggle theme"
+          class="rounded-md p-1.5 text-stone-500 hover:bg-stone-100 hover:text-stone-800
+                 dark:hover:bg-stone-800 dark:hover:text-stone-200"
+        >
+          <svg viewBox="0 0 24 24" class="size-4" aria-hidden="true">
+            <path
+              fill="currentColor"
+              d="M12 18a6 6 0 1 1 0-12 6 6 0 0 1 0 12m0-2a4 4 0 1 0 0-8zM11 1h2v3h-2zm0
+                 19h2v3h-2zM1 11h3v2H1zm19 0h3v2h-3zM3.5 5l1.4-1.4 2.1 2.1L5.6 7.1zm13.5
+                 13.5 1.4-1.4 2.1 2.1-1.4 1.4zM18.4 7.1 16.9 5.7 19 3.6l1.4 1.4zM5 20.5
+                 3.6 19l2.1-2.1 1.4 1.4z"
+            />
+          </svg>
+        </button>
+      </div>
+      <button
+        id="forget"
+        class="mt-3 w-full rounded-lg border border-red-200 px-3 py-1.5 text-xs
+               font-medium text-red-600 hover:bg-red-50 dark:border-red-900/60
+               dark:text-red-400 dark:hover:bg-red-950/40"
+      >
+        Forget me
+      </button>
+    </div>
+  </aside>
+
+  <main class="flex min-w-0 flex-1 flex-col">
+    <header
+      class="flex items-center gap-3 border-b border-stone-200 bg-white/70 px-4 py-3
+             backdrop-blur md:px-8 dark:border-stone-800 dark:bg-stone-900/70"
+    >
+      <button
+        id="menu"
+        class="rounded-md p-1.5 text-stone-500 hover:bg-stone-100 md:hidden
+               dark:hover:bg-stone-800"
+        title="Conversations"
+      >
+        <svg viewBox="0 0 24 24" class="size-5" aria-hidden="true">
+          <path fill="currentColor" d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z" />
+        </svg>
+      </button>
+      <div class="min-w-0">
+        <h1 class="truncate text-sm font-medium">Grounded answers from your documents</h1>
+        <p id="thread-label" class="truncate font-mono text-xs text-stone-500 dark:text-stone-400">
+          no conversation yet
+        </p>
+      </div>
+    </header>
+
+    <div id="messages" class="scroll-slim flex-1 space-y-6 overflow-y-auto px-4 py-8 md:px-8">
+      <section id="empty-state" class="mx-auto max-w-2xl text-center">
+        <h2 class="font-display text-2xl">Ask about the knowledge base</h2>
+        <p class="mx-auto mt-2 max-w-md text-sm text-stone-500 dark:text-stone-400">
+          Every answer cites the documents it came from. If nothing relevant is
+          retrieved, cairn says so rather than guessing.
+        </p>
+        <div class="mt-6 grid gap-2 sm:grid-cols-2">
+          <button
+            class="suggestion rounded-xl border border-stone-200 bg-white px-4 py-3
+                   text-left text-sm hover:border-cairn-300 hover:shadow-xs
+                   dark:border-stone-800 dark:bg-stone-900 dark:hover:border-cairn-700"
+          >
+            How long do I have to submit an expense report?
+          </button>
+          <button
+            class="suggestion rounded-xl border border-stone-200 bg-white px-4 py-3
+                   text-left text-sm hover:border-cairn-300 hover:shadow-xs
+                   dark:border-stone-800 dark:bg-stone-900 dark:hover:border-cairn-700"
+          >
+            How do I connect to the corporate VPN?
+          </button>
+          <button
+            class="suggestion rounded-xl border border-stone-200 bg-white px-4 py-3
+                   text-left text-sm hover:border-cairn-300 hover:shadow-xs
+                   dark:border-stone-800 dark:bg-stone-900 dark:hover:border-cairn-700"
+          >
+            When is an approved expense reimbursed?
+          </button>
+          <button
+            class="suggestion rounded-xl border border-stone-200 bg-white px-4 py-3
+                   text-left text-sm hover:border-cairn-300 hover:shadow-xs
+                   dark:border-stone-800 dark:bg-stone-900 dark:hover:border-cairn-700"
+          >
+            Remember that I work in accounts payable
+          </button>
+        </div>
+      </section>
+    </div>
+
+    <div class="border-t border-stone-200 bg-white px-4 py-4 md:px-8 dark:border-stone-800
+                dark:bg-stone-900">
+      <form id="composer" class="mx-auto flex max-w-3xl items-end gap-2">
+        <textarea
+          id="input"
+          rows="1"
+          placeholder="Ask a question…  (Enter to send, Shift+Enter for a new line)"
+          class="scroll-slim max-h-40 min-h-11 flex-1 resize-none rounded-xl border
+                 border-stone-300 bg-stone-50 px-4 py-2.5 text-sm outline-none
+                 focus:border-cairn-500 focus:ring-2 focus:ring-cairn-500/30
+                 dark:border-stone-700 dark:bg-stone-950"
+        ></textarea>
+        <button
+          id="send"
+          type="submit"
+          class="flex size-11 shrink-0 items-center justify-center rounded-xl bg-cairn-600
+                 text-white hover:bg-cairn-700 disabled:cursor-not-allowed
+                 disabled:opacity-40"
+        >
+          <svg viewBox="0 0 24 24" class="size-5" aria-hidden="true">
+            <path fill="currentColor" d="M3 20.5V3.5L22 12zM5 17.4 16.85 12 5 6.6v3.9l6 1.5-6
+              1.5z" />
+          </svg>
+        </button>
+      </form>
+      <p class="mx-auto mt-2 max-w-3xl text-xs text-stone-400 dark:text-stone-500">
+        Only the newest message is sent — earlier turns are restored from the checkpoint.
+      </p>
+    </div>
+  </main>
+</div>
+
+<!-- Rendered by app.js. Kept here so every Tailwind class stays in a template file. -->
+<template id="tpl-user">
+  <article class="animate-rise flex justify-end">
+    <div class="max-w-[85%] rounded-2xl rounded-br-md bg-cairn-600 px-4 py-2.5 text-sm
+                whitespace-pre-wrap text-white md:max-w-[70%]"></div>
+  </article>
+</template>
+
+<template id="tpl-assistant">
+  <article class="animate-rise flex justify-start">
+    <div class="max-w-[85%] space-y-3 md:max-w-[75%]">
+      <div
+        class="rounded-2xl rounded-bl-md border border-stone-200 bg-white px-4 py-3 text-sm
+               leading-relaxed whitespace-pre-wrap dark:border-stone-800 dark:bg-stone-900"
+        data-answer
+      ></div>
+      <div data-sources class="flex flex-wrap items-center gap-1.5"></div>
+    </div>
+  </article>
+</template>
+
+<template id="tpl-source">
+  <span
+    class="inline-flex items-center gap-1.5 rounded-full border border-cairn-300/60
+           bg-cairn-50 px-2.5 py-1 font-mono text-xs text-cairn-700 dark:border-cairn-700/60
+           dark:bg-cairn-700/15 dark:text-cairn-300"
+  >
+    <span data-source></span>
+    <span data-score class="text-cairn-600/70 dark:text-cairn-300/60"></span>
+  </span>
+</template>
+
+<template id="tpl-ungrounded">
+  <span class="text-xs text-amber-700 dark:text-amber-500">
+    Not drawn from your documents — nothing relevant was retrieved.
+  </span>
+</template>
+
+<template id="tpl-marker">
+  <sup
+    class="mx-0.5 rounded bg-cairn-100 px-1 py-0.5 font-mono text-[0.65rem] text-cairn-700
+           dark:bg-cairn-700/25 dark:text-cairn-300"
+  ></sup>
+</template>
+
+<template id="tpl-typing">
+  <article class="animate-rise flex justify-start" data-typing>
+    <div
+      class="flex gap-1 rounded-2xl rounded-bl-md border border-stone-200 bg-white px-4 py-3.5
+             dark:border-stone-800 dark:bg-stone-900"
+    >
+      <span class="size-1.5 animate-bounce rounded-full bg-stone-400 [animation-delay:-0.3s]">
+      </span>
+      <span class="size-1.5 animate-bounce rounded-full bg-stone-400 [animation-delay:-0.15s]">
+      </span>
+      <span class="size-1.5 animate-bounce rounded-full bg-stone-400"></span>
+    </div>
+  </article>
+</template>
+
+<template id="tpl-thread">
+  <li>
+    <button
+      class="w-full truncate rounded-lg px-2.5 py-1.5 text-left font-mono text-xs
+             text-stone-600 hover:bg-stone-100 aria-[current=true]:bg-cairn-50
+             aria-[current=true]:text-cairn-700 dark:text-stone-400
+             dark:hover:bg-stone-800 dark:aria-[current=true]:bg-cairn-700/20
+             dark:aria-[current=true]:text-cairn-300"
+    ></button>
+  </li>
+</template>
+
+<template id="tpl-fact">
+  <li
+    class="rounded-lg border border-stone-200 bg-stone-50 px-2.5 py-1.5 text-xs
+           text-stone-600 dark:border-stone-800 dark:bg-stone-950 dark:text-stone-400"
+  ></li>
+</template>
+
+<template id="tpl-toast">
+  <div
+    class="animate-rise fixed bottom-6 left-1/2 z-40 -translate-x-1/2 rounded-full
+           bg-stone-900 px-4 py-2 text-xs text-white shadow-lg dark:bg-stone-100
+           dark:text-stone-900"
+  ></div>
+</template>
+{% endblock %}

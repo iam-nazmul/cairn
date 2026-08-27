@@ -10,11 +10,13 @@ from typing import Any, Literal
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from src.api import web
 from src.config import Context, get_settings
 from src.graph.build import build_graph
 from src.memory.checkpointer import checkpointer_scope
+from src.memory.facts import load_user_facts
 from src.memory.store import store_scope
-from src.memory.threads import forget_user
+from src.memory.threads import forget_user, list_threads
 from src.observability import configure_logging
 from src.rag.prompts import cited_chunks
 
@@ -58,6 +60,16 @@ class DeletionResponse(BaseModel):
     facts_deleted: int
 
 
+class ThreadListResponse(BaseModel):
+    user_id: str
+    threads: list[str]
+
+
+class FactListResponse(BaseModel):
+    user_id: str
+    facts: list[str]
+
+
 class HealthResponse(BaseModel):
     status: Literal["ok"]
     env: str
@@ -77,6 +89,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 
 app = FastAPI(title="cairn", lifespan=lifespan)
+web.mount(app)
 
 
 @app.get("/health")
@@ -111,6 +124,21 @@ async def chat(request: Request, body: ChatRequest) -> ChatResponse:
         for chunk in cited_chunks(answer, result.get("retrieved") or [])
     ]
     return ChatResponse(answer=answer, citations=citations, thread_id=body.thread_id)
+
+
+@app.get("/users/{user_id}/threads")
+async def user_threads(request: Request, user_id: str) -> ThreadListResponse:
+    """The user's conversations, from the same index deletion walks."""
+    threads = await list_threads(request.app.state.store, user_id)
+    return ThreadListResponse(user_id=user_id, threads=threads)
+
+
+@app.get("/users/{user_id}/facts")
+async def user_facts(request: Request, user_id: str) -> FactListResponse:
+    """What the Store holds on this user -- the same list `load_memory` injects."""
+    settings = request.app.state.settings
+    facts = await load_user_facts(request.app.state.store, user_id, settings.max_long_term_facts)
+    return FactListResponse(user_id=user_id, facts=facts)
 
 
 @app.delete("/users/{user_id}")

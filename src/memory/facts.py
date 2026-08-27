@@ -6,6 +6,8 @@ import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 
+from langgraph.store.base import BaseStore
+
 FACTS_NS = "facts"
 PREFERENCES_NS = "preferences"
 
@@ -30,6 +32,15 @@ class Fact:
     key: str  # stable: the same attribute always lands on the same key
     text: str
     namespace: str  # FACTS_NS | PREFERENCES_NS
+
+
+async def load_user_facts(store: BaseStore, user_id: str, limit: int) -> list[str]:
+    """Every durable fact on file for `user_id`, across both fact namespaces."""
+    facts: list[str] = []
+    for namespace in (FACTS_NS, PREFERENCES_NS):
+        items = await store.asearch((user_id, namespace), limit=limit)
+        facts.extend(str(item.value.get("text", "")) for item in items)
+    return sorted(f for f in facts if f)
 
 
 def slugify(text: str, max_len: int = 48) -> str:

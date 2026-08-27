@@ -12,10 +12,9 @@ from langgraph.runtime import Runtime
 from src.config import Context, Settings
 from src.graph.state import ChatState, RetrievedChunk
 from src.memory.facts import (
-    FACTS_NS,
     LLM_EXTRACTION_PROMPT,
-    PREFERENCES_NS,
     extract_facts,
+    load_user_facts,
     parse_llm_facts,
 )
 from src.memory.threads import register_thread
@@ -40,13 +39,8 @@ def make_load_memory(settings: Settings) -> Node:
         if store is None:
             return {"long_term_facts": []}
 
-        user_id = runtime.context.user_id
-        facts: list[str] = []
-        for namespace in (FACTS_NS, PREFERENCES_NS):
-            items = await store.asearch((user_id, namespace), limit=settings.max_long_term_facts)
-            facts.extend(str(item.value.get("text", "")) for item in items)
-
-        return {"long_term_facts": sorted(f for f in facts if f)}
+        facts = await load_user_facts(store, runtime.context.user_id, settings.max_long_term_facts)
+        return {"long_term_facts": facts}
 
     return load_memory
 
