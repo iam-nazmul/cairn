@@ -26,6 +26,7 @@ from src.graph.nodes import (
     route_after_generate,
 )
 from src.graph.state import ChatState
+from src.observability import instrument
 from src.rag.llm import ChatModel, get_chat_model
 from src.rag.retrieve import VectorStore, get_vector_store
 
@@ -46,11 +47,14 @@ def build_graph(
     # context_schema declares Context so nodes can read runtime.context.user_id.
     builder = StateGraph(ChatState, context_schema=Context)
 
-    builder.add_node("load_memory", make_load_memory(settings))
-    builder.add_node("retrieve", make_retrieve(vector_store, settings))
-    builder.add_node("generate", make_generate(chat_model, settings))
-    builder.add_node("clarify", make_clarify(chat_model, settings))
-    builder.add_node("write_memory", make_write_memory(settings, chat_model))
+    # Instrumentation is applied here, at wiring time, so node code stays clean.
+    builder.add_node("load_memory", instrument("load_memory", make_load_memory(settings)))
+    builder.add_node("retrieve", instrument("retrieve", make_retrieve(vector_store, settings)))
+    builder.add_node("generate", instrument("generate", make_generate(chat_model, settings)))
+    builder.add_node("clarify", instrument("clarify", make_clarify(chat_model, settings)))
+    builder.add_node(
+        "write_memory", instrument("write_memory", make_write_memory(settings, chat_model))
+    )
 
     builder.add_edge(START, "load_memory")
     builder.add_edge("load_memory", "retrieve")

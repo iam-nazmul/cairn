@@ -16,6 +16,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any, Protocol
 
 from langchain.messages import HumanMessage, SystemMessage
+from langgraph.config import get_config
 from langgraph.runtime import Runtime
 
 from src.config import Context, Settings
@@ -27,6 +28,7 @@ from src.memory.facts import (
     extract_facts,
     parse_llm_facts,
 )
+from src.memory.threads import register_thread
 from src.rag.llm import ChatModel
 from src.rag.prompts import assemble_messages, build_system_prompt, cited_chunks
 from src.rag.retrieve import VectorStore, augment_query_with_history
@@ -83,6 +85,14 @@ def make_write_memory(settings: Settings, chat_model: ChatModel) -> Node:
         if store is None or settings.memory_extraction == "off":
             return {}
 
+        user_id = runtime.context.user_id
+
+        # Index the thread against the user. The checkpointer cannot answer
+        # "which threads belong to this user?", and SPEC §10 deletion needs it.
+        thread_id = get_config().get("configurable", {}).get("thread_id")
+        if thread_id:
+            await register_thread(store, user_id, str(thread_id))
+
         question = state["question"]
         if settings.memory_extraction == "llm":
             reply = await chat_model.ainvoke(
@@ -96,7 +106,6 @@ def make_write_memory(settings: Settings, chat_model: ChatModel) -> Node:
         else:
             facts = extract_facts(question)
 
-        user_id = runtime.context.user_id
         for fact in facts:
             # Upsert on a stable key: a fresh uuid per turn would duplicate
             # facts instead of updating them (SPEC §7.2).
@@ -139,7 +148,9 @@ def make_generate(chat_model: ChatModel, settings: Settings) -> Node:
             max_chars=settings.max_context_chars,
             grounded=True,
         )
-        reply = await chat_model.ainvoke(assemble_messages(state, system))
+        reply = await chat_model.ainvoke(
+            assemble_messages(state, system, settings.max_history_tokens)
+        )
         answer = reply.text if isinstance(reply.text, str) else str(reply.content)
 
         if chunks and not cited_chunks(answer, chunks):
@@ -170,7 +181,9 @@ def make_clarify(chat_model: ChatModel, settings: Settings) -> Node:
             max_chars=settings.max_context_chars,
             grounded=False,
         )
-        reply = await chat_model.ainvoke(assemble_messages(state, system))
+        reply = await chat_model.ainvoke(
+            assemble_messages(state, system, settings.max_history_tokens)
+        )
         answer = reply.text if isinstance(reply.text, str) else str(reply.content)
         return {"answer": answer, "messages": [reply]}
 

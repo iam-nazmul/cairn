@@ -186,7 +186,7 @@ Supporting endpoints:
 
 ## 11. Risks & Open Questions
 
-- **Long threads overflow the context window.** Mitigation: trim old messages or summarize the thread into a running summary node (Phase 2).
+- ~~**Long threads overflow the context window.**~~ — **MITIGATED (M4):** history is trimmed to `MAX_HISTORY_TOKENS` before the model call (`assemble_messages`), newest turns kept, oldest dropped. Trimming is prompt-time only: the full thread stays in the checkpoint and `/threads/{id}/history` still returns all of it. Running-summary compaction remains a Phase 2 option if trimming proves lossy.
 - ~~**What extracts long-term facts** in `write_memory`~~ — **RESOLVED (M3): deterministic rules by default, LLM extraction behind a flag.**
   Explicit `remember that ...` commands plus a tight set of first-person patterns
   (`my <attribute> is <value>`, `I prefer ...`). Rationale: a bad fact is not wrong
@@ -199,7 +199,7 @@ Supporting endpoints:
   it adds a model call to the write path of every turn, including turns containing
   no facts. Accepted cost: rules miss paraphrases they were not written for.
 - **Corpus ingestion & re-indexing** is out of scope here — confirm the vector store and metadata schema are owned elsewhere.
-- **Citation faithfulness** — need an eval to verify answers are actually grounded in retrieved chunks.
+- ~~**Citation faithfulness**~~ — **ADDRESSED (M1, extended M4):** `tests/test_citations.py` asserts every answer cites a chunk that retrieval actually returned, and that the cited claim appears verbatim in the chunk it points at. An answer the model cannot cite is dropped and re-answered by the no-answer path rather than shipped as grounded.
 - ~~**Store backend**~~ — **RESOLVED (M3): reuse the checkpointer's Postgres with pgvector. One `DATABASE_URL`, not two.**
   Right-to-be-forgotten (§10) spans both memory systems, and M4 must make "delete
   this user's threads *and* facts" verifiable; one database makes that one

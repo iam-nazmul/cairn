@@ -10,6 +10,8 @@ SQLite is the real backend for M2; Postgres joins the parameter list in M4.
 
 from __future__ import annotations
 
+import os
+import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -41,12 +43,26 @@ def turn(text: str) -> dict[str, object]:
     return {"messages": [{"role": "user", "content": text}], "question": text}
 
 
+POSTGRES_URI = os.environ.get("POSTGRES_TEST_URI", "")
+
+requires_postgres = pytest.mark.skipif(
+    not POSTGRES_URI, reason="set POSTGRES_TEST_URI to run the Postgres memory tests"
+)
+
+
 def settings_for(backend: str, tmp_path: Path) -> Settings:
     if backend == "memory":
         return Settings(env="dev", llm_provider="fake")
     if backend == "sqlite":
         return Settings(env="local", llm_provider="fake", sqlite_path=str(tmp_path / "cp.db"))
+    if backend == "postgres":
+        return Settings(env="prod", llm_provider="fake", database_url=POSTGRES_URI)
     raise AssertionError(f"unknown backend {backend!r}")
+
+
+def thread_id(label: str) -> str:
+    """Unique per run: Postgres persists between runs, so fixed ids would collide."""
+    return f"t-{label}-{uuid.uuid4().hex[:12]}"
 
 
 @asynccontextmanager
@@ -56,14 +72,20 @@ async def graph_for(settings: Settings) -> AsyncIterator[Graph]:
         yield build_graph(checkpointer=checkpointer, store=store, settings=settings)
 
 
-BACKENDS = ["memory", "sqlite"]
+# In-memory is a fast signal only -- it cannot fail durability, so it never
+# counts as passing coverage on its own. CLAUDE.md requires SQLite AND Postgres.
+BACKENDS = [
+    "memory",
+    "sqlite",
+    pytest.param("postgres", marks=[pytest.mark.postgres, requires_postgres]),
+]
 
 
 @pytest.mark.parametrize("backend", BACKENDS)
 async def test_thread_continuity(backend: str, tmp_path: Path) -> None:
     """Same thread_id: the second turn sees the first. The canonical test."""
     async with graph_for(settings_for(backend, tmp_path)) as graph:
-        config = {"configurable": {"thread_id": "t-continuity"}}
+        config = {"configurable": {"thread_id": thread_id("continuity")}}
 
         await graph.ainvoke(turn(STATEMENT), config, context=CONTEXT)
         out = await graph.ainvoke(turn(QUESTION), config, context=CONTEXT)
@@ -76,10 +98,10 @@ async def test_thread_isolation(backend: str, tmp_path: Path) -> None:
     """Different thread_id: conversation state does not leak, even for one user."""
     async with graph_for(settings_for(backend, tmp_path)) as graph:
         await graph.ainvoke(
-            turn(STATEMENT), {"configurable": {"thread_id": "t-a"}}, context=CONTEXT
+            turn(STATEMENT), {"configurable": {"thread_id": thread_id("a")}}, context=CONTEXT
         )
         out = await graph.ainvoke(
-            turn(QUESTION), {"configurable": {"thread_id": "t-b"}}, context=CONTEXT
+            turn(QUESTION), {"configurable": {"thread_id": thread_id("b")}}, context=CONTEXT
         )
 
     assert "invoice 42" not in out["answer"].lower()
@@ -90,7 +112,7 @@ async def test_history_accumulates_without_the_client_resending_it(
     backend: str, tmp_path: Path
 ) -> None:
     async with graph_for(settings_for(backend, tmp_path)) as graph:
-        config = {"configurable": {"thread_id": "t-accumulate"}}
+        config = {"configurable": {"thread_id": thread_id("accumulate")}}
 
         await graph.ainvoke(turn(STATEMENT), config, context=CONTEXT)
         await graph.ainvoke(turn(QUESTION), config, context=CONTEXT)
@@ -101,13 +123,20 @@ async def test_history_accumulates_without_the_client_resending_it(
     assert snapshot.values["messages"][0].content == STATEMENT
 
 
-async def test_durability_across_a_process_restart(tmp_path: Path) -> None:
-    """A NEW saver instance against the same file still sees the thread.
+DURABLE_BACKENDS = [
+    "sqlite",
+    pytest.param("postgres", marks=[pytest.mark.postgres, requires_postgres]),
+]
 
-    This is the one in-memory can never pass, which is why it is SQLite-only.
+
+@pytest.mark.parametrize("backend", DURABLE_BACKENDS)
+async def test_durability_across_a_process_restart(backend: str, tmp_path: Path) -> None:
+    """A NEW saver instance against the same backing store still sees the thread.
+
+    This is the one in-memory can never pass, which is why it is excluded.
     """
-    settings = settings_for("sqlite", tmp_path)
-    config = {"configurable": {"thread_id": "t-durable"}}
+    settings = settings_for(backend, tmp_path)
+    config = {"configurable": {"thread_id": thread_id("durable")}}
 
     async with graph_for(settings) as graph_a:
         await graph_a.ainvoke(turn(STATEMENT), config, context=CONTEXT)
@@ -126,7 +155,7 @@ async def test_sqlite_file_is_actually_written(tmp_path: Path) -> None:
     settings = settings_for("sqlite", tmp_path)
     async with graph_for(settings) as graph:
         await graph.ainvoke(
-            turn(STATEMENT), {"configurable": {"thread_id": "t-file"}}, context=CONTEXT
+            turn(STATEMENT), {"configurable": {"thread_id": thread_id("file")}}, context=CONTEXT
         )
 
     # Blocking stat in a test assertion, not on the request path.

@@ -8,8 +8,10 @@ markers are mapped back onto the retrieved chunks they refer to, which is how
 from __future__ import annotations
 
 import re
+from typing import cast
 
 from langchain.messages import AnyMessage, HumanMessage, SystemMessage
+from langchain_core.messages.utils import count_tokens_approximately, trim_messages
 
 from src.graph.state import ChatState, RetrievedChunk
 
@@ -77,16 +79,38 @@ def build_system_prompt(
     return "\n\n".join(parts)
 
 
-def assemble_messages(state: ChatState, system: str) -> list[AnyMessage]:
+def assemble_messages(
+    state: ChatState, system: str, max_history_tokens: int | None = None
+) -> list[AnyMessage]:
     """System prompt + checkpointed history (which already ends with this turn).
 
     History comes from the checkpointer via `state["messages"]` -- never from the
     client and never from a hand-rolled table (CLAUDE.md memory boundaries).
+
+    Long threads are trimmed to `max_history_tokens` before the model call: the
+    oldest turns are dropped, the newest kept. Nothing is deleted from the
+    checkpoint -- the full thread is still there, and /threads/{id}/history still
+    returns all of it. This is the SPEC §11 context-overflow mitigation.
     """
     history: list[AnyMessage] = list(state.get("messages") or [])
     if not history:
         # Defensive: a node unit-tested with a bare state still gets the question.
         history = [HumanMessage(content=state["question"])]
+
+    if max_history_tokens is not None:
+        trimmed = trim_messages(
+            history,
+            strategy="last",
+            token_counter=count_tokens_approximately,
+            max_tokens=max_history_tokens,
+            start_on="human",
+            include_system=False,
+            allow_partial=False,
+        )
+        # trim_messages can return nothing if a single turn blows the budget;
+        # the current question must always survive.
+        history = cast(list[AnyMessage], list(trimmed)) or history[-1:]
+
     return [SystemMessage(content=system), *history]
 
 

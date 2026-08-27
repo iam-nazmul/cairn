@@ -61,6 +61,9 @@ class Settings(BaseSettings):
     retrieval_top_k: int = 4
     retrieval_min_score: float = 0.05
     max_context_chars: int = 4000
+    # History budget (SPEC §10, and the §11 long-thread risk). Older turns are
+    # trimmed before the LLM call; the checkpoint keeps them all.
+    max_history_tokens: int = 1500
 
 
 @lru_cache(maxsize=1)

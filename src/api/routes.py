@@ -20,6 +20,7 @@ from src.config import Context, get_settings
 from src.graph.build import build_graph
 from src.memory.checkpointer import checkpointer_scope
 from src.memory.store import store_scope
+from src.memory.threads import forget_user
 from src.rag.prompts import cited_chunks
 
 
@@ -54,6 +55,14 @@ class HistoryResponse(BaseModel):
     messages: list[HistoryMessage]
 
 
+class DeletionResponse(BaseModel):
+    """What was actually removed, so the caller can verify rather than trust."""
+
+    user_id: str
+    threads_deleted: int
+    facts_deleted: int
+
+
 class HealthResponse(BaseModel):
     status: Literal["ok"]
     env: str
@@ -65,6 +74,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings = get_settings()
     async with checkpointer_scope(settings) as checkpointer, store_scope(settings) as store:
         app.state.settings = settings
+        app.state.checkpointer = checkpointer
+        app.state.store = store
         app.state.graph = build_graph(checkpointer=checkpointer, store=store, settings=settings)
         yield
 
@@ -105,6 +116,18 @@ async def chat(request: Request, body: ChatRequest) -> ChatResponse:
         for chunk in cited_chunks(answer, result.get("retrieved") or [])
     ]
     return ChatResponse(answer=answer, citations=citations, thread_id=body.thread_id)
+
+
+@app.delete("/users/{user_id}")
+async def forget(request: Request, user_id: str) -> DeletionResponse:
+    """Right to be forgotten (SPEC §10).
+
+    Spans BOTH memory systems: every checkpoint for every thread the user owns,
+    and every Store namespace scoped to that user. Other users are untouched.
+    Idempotent -- deleting an unknown user reports zeroes rather than failing.
+    """
+    report = await forget_user(request.app.state.store, request.app.state.checkpointer, user_id)
+    return DeletionResponse(**report.as_dict())
 
 
 @app.get("/threads/{thread_id}/history")

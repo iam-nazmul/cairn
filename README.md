@@ -49,15 +49,23 @@ CAIRN_TEST_OLLAMA=1 uv run pytest -m ollama
 ENV=local uv run uvicorn src.api.routes:app --reload
 ```
 
-`ENV` selects the checkpointer: `dev` → in-memory (resets on restart), `local` →
-SQLite at `SQLITE_PATH`, `prod` → Postgres (M4). The graph code is identical
-across all three.
+`ENV` selects the backend: `dev` → in-memory (resets on restart), `local` →
+SQLite at `SQLITE_PATH`, `prod` → Postgres at `DATABASE_URL`. The graph code is
+identical across all three.
+
+For `prod`, one Postgres backs **both** the checkpointer and the Store (SPEC §11):
+
+```bash
+docker compose up -d        # pgvector/pgvector:pg16 on :5433
+ENV=prod uv run uvicorn src.api.routes:app
+```
 
 | Endpoint | Purpose |
 |---|---|
 | `POST /chat` | One turn. Send **only** the new message — prior turns come from the checkpoint. |
 | `POST /threads` | Mint a new `thread_id`. |
 | `GET /threads/{id}/history` | Checkpointed history for a thread. |
+| `DELETE /users/{user_id}` | Right to be forgotten: every thread **and** every stored fact. |
 | `GET /health` | Liveness, plus the active backend and provider. |
 
 ```bash
@@ -74,6 +82,38 @@ uv run ruff format .
 uv run mypy src
 ```
 
+`pytest` alone skips the two opt-in suites. To run everything:
+
+```bash
+docker compose up -d
+POSTGRES_TEST_URI=postgresql://cairn:cairn@localhost:5433/cairn?sslmode=disable \
+  CAIRN_TEST_OLLAMA=1 uv run pytest
+```
+
+## Deleting a user (SPEC §10)
+
+```bash
+curl -X DELETE localhost:8000/users/u_123
+# {"user_id":"u_123","threads_deleted":2,"facts_deleted":1}
+```
+
+Deletion spans **both** memory systems: every checkpoint for every thread the user
+owns, and every Store namespace scoped to them. The checkpointer is keyed by
+`thread_id` alone and its metadata carries no `user_id`, so a thread index is kept
+in the Store under `(user_id, "threads")` — thread ids only, no message content.
+Adding a third place user data lands means adding it to `USER_NAMESPACES`, or
+deletion silently becomes partial. A test asserts that list stays complete.
+
+## Observability
+
+Every node logs its duration, retrieval hits and scores, facts loaded, and
+approximate answer tokens, tagged with `thread_id`:
+
+```
+node=retrieve thread=t_abc ms=0.4 hits=2 doc://kb/expenses-2=0.4 doc://kb/expenses-1=0.2
+node=generate thread=t_abc ms=1412.7 answer_tokens~24
+```
+
 ## Status
 
 | Milestone | State |
@@ -81,7 +121,7 @@ uv run mypy src
 | M1 — skeleton: `retrieve → generate`, in-memory checkpointer, cited answers | done |
 | M2 — short-term memory: SQLite checkpointer, `/chat` + threads endpoints | done |
 | M3 — long-term memory: Store, `load_memory` / `write_memory` | done |
-| M4 — hardening: Postgres, observability, trimming, deletion APIs | not started |
+| M4 — hardening: Postgres, observability, trimming, deletion APIs | done |
 
 ## How a turn is routed
 

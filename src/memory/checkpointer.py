@@ -17,6 +17,7 @@ from typing import Any
 
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
 from src.config import Settings
@@ -36,6 +37,9 @@ async def checkpointer_scope(settings: Settings) -> AsyncIterator[BaseCheckpoint
             yield saver
         return
 
-    raise NotImplementedError(
-        f"checkpointer backend for ENV={settings.env!r} is not wired yet (Postgres lands in M4)"
-    )
+    if not settings.database_url:
+        raise ValueError("DATABASE_URL is required when ENV=prod")
+
+    async with AsyncPostgresSaver.from_conn_string(settings.database_url) as saver:
+        await saver.setup()  # idempotent; creates the checkpoint tables
+        yield saver
