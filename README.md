@@ -43,6 +43,28 @@ stay offline and deterministic. To exercise a real model:
 CAIRN_TEST_OLLAMA=1 uv run pytest -m ollama
 ```
 
+## Running it
+
+```bash
+ENV=local uv run uvicorn src.api.routes:app --reload
+```
+
+`ENV` selects the checkpointer: `dev` → in-memory (resets on restart), `local` →
+SQLite at `SQLITE_PATH`, `prod` → Postgres (M4). The graph code is identical
+across all three.
+
+| Endpoint | Purpose |
+|---|---|
+| `POST /chat` | One turn. Send **only** the new message — prior turns come from the checkpoint. |
+| `POST /threads` | Mint a new `thread_id`. |
+| `GET /threads/{id}/history` | Checkpointed history for a thread. |
+| `GET /health` | Liveness, plus the active backend and provider. |
+
+```bash
+curl -s localhost:8000/chat -H 'content-type: application/json' \
+  -d '{"user_id":"u_1","thread_id":"t_1","message":"How long do I have to submit an expense report?"}'
+```
+
 ## Quality gates
 
 ```bash
@@ -57,16 +79,27 @@ uv run mypy src
 | Milestone | State |
 |---|---|
 | M1 — skeleton: `retrieve → generate`, in-memory checkpointer, cited answers | done |
-| M2 — short-term memory: SQLite checkpointer, `/chat` + threads endpoints | not started |
-
-### Known gap (for M2)
-
-`retrieve` searches the raw question, so a follow-up that depends on the previous
-turn ("and when do I get the money back?") retrieves nothing and falls to the
-clarify path. SPEC §6.2 already allows for this — "embed the *(optionally
-history-rewritten)* query" — and multi-turn continuity is M2's job.
+| M2 — short-term memory: SQLite checkpointer, `/chat` + threads endpoints | done |
 | M3 — long-term memory: Store, `load_memory` / `write_memory` | not started |
 | M4 — hardening: Postgres, observability, trimming, deletion APIs | not started |
+
+## How a turn is routed
+
+```
+START → retrieve → generate → END
+             ↘         ↘
+              clarify ←┘ → END
+```
+
+`retrieve` searches the question directly; if that comes back empty or weak it
+retries with recent user turns folded in, so a follow-up like *"and when do I get
+the money back?"* still finds the right documents (SPEC §6.2's "history-rewritten
+query").
+
+Two routes lead to `clarify`, the no-answer path: retrieval found nothing usable,
+or `generate` produced an answer it could not cite. An uncited answer is never
+returned as grounded — it is dropped and the turn is re-answered without sources,
+rather than presenting model priors as knowledge.
 
 ## Seams (deliberately stubbed)
 

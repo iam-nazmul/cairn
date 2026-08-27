@@ -2,16 +2,15 @@
 
 from __future__ import annotations
 
-import pytest
 from langchain.messages import AIMessage, HumanMessage
 
 from src.config import Settings
 from src.graph.nodes import (
-    UngroundedAnswerError,
     make_clarify,
     make_generate,
     make_retrieve,
     make_route_after_retrieve,
+    route_after_generate,
 )
 from src.graph.state import RetrievedChunk
 from src.rag.llm import ChatModel, DeterministicChatModel
@@ -57,13 +56,24 @@ async def test_generate_appends_one_message_and_cites(settings: Settings) -> Non
     assert "[S1]" in result["answer"]
 
 
-async def test_generate_rejects_an_uncited_answer(settings: Settings) -> None:
-    """CLAUDE.md: an answer without citations is a bug -- fail, do not ship it."""
+async def test_generate_drops_an_uncited_answer(settings: Settings) -> None:
+    """An uncited answer must never ship as grounded (CLAUDE.md Retrieval).
+
+    It is dropped rather than raised on: the usual cause is the model correctly
+    declining because the retrieved context did not support the question.
+    """
     node = make_generate(_NoCitationModel(), settings)
     state = make_state(question="What is the receipt threshold?", retrieved=[CHUNK])
 
-    with pytest.raises(UngroundedAnswerError):
-        await node(state, runtime=make_runtime())
+    result = await node(state, runtime=make_runtime())
+
+    assert result["answer"] == ""
+    assert "messages" not in result, "the discarded reply must not enter history"
+    assert route_after_generate(make_state(**result)) == "clarify"
+
+
+def test_route_after_generate_ends_on_a_cited_answer() -> None:
+    assert route_after_generate(make_state(answer="Receipts over 25 dollars. [S1]")) == "generate"
 
 
 async def test_clarify_answers_without_citing_anything(settings: Settings) -> None:

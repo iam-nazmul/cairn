@@ -7,7 +7,10 @@ a pgvector- or managed-DB-backed implementation without touching the graph.
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from typing import Protocol, runtime_checkable
+
+from langchain.messages import AnyMessage
 
 from src.graph.state import RetrievedChunk
 from src.rag.fixtures import SEED_DOCS, SeedDoc
@@ -102,6 +105,23 @@ class InMemoryVectorStore:
         # Sort by score desc, then source for a stable tie-break.
         scored.sort(key=lambda c: (-c["score"], c["source"]))
         return scored[:top_k]
+
+
+def augment_query_with_history(
+    question: str, messages: Sequence[AnyMessage], max_turns: int = 2
+) -> str:
+    """Fold recent user turns into the search query (SPEC §6.2, "history-rewritten").
+
+    A follow-up like "and when do I get the money back?" shares no vocabulary
+    with the corpus; the terms that make it findable were established earlier in
+    the thread. Only prior HUMAN turns are folded in -- reusing the assistant's
+    own words would anchor retrieval to whatever it said last.
+    """
+    prior = [str(m.content) for m in messages if m.type == "human"]
+    if prior and prior[-1].strip() == question.strip():
+        prior = prior[:-1]  # drop the current turn
+    recent = prior[-max_turns:]
+    return " ".join([*recent, question]) if recent else question
 
 
 def get_vector_store() -> VectorStore:

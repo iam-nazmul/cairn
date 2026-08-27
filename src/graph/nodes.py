@@ -18,10 +18,10 @@ from typing import Any, Protocol
 from langgraph.runtime import Runtime
 
 from src.config import Context, Settings
-from src.graph.state import ChatState
+from src.graph.state import ChatState, RetrievedChunk
 from src.rag.llm import ChatModel
-from src.rag.prompts import assemble_messages, build_system_prompt
-from src.rag.retrieve import VectorStore
+from src.rag.prompts import assemble_messages, build_system_prompt, cited_chunks
+from src.rag.retrieve import VectorStore, augment_query_with_history
 
 
 class Node(Protocol):
@@ -38,17 +38,23 @@ class Node(Protocol):
     ) -> Awaitable[dict[str, Any]]: ...
 
 
-class UngroundedAnswerError(RuntimeError):
-    """Raised when the model answers from retrieved context without citing it.
-
-    CLAUDE.md: "Answers without citations are a bug." Rather than shipping an
-    uncited claim, the turn fails loudly.
-    """
-
-
 def make_retrieve(vector_store: VectorStore, settings: Settings) -> Node:
+    def too_weak(chunks: list[RetrievedChunk]) -> bool:
+        return not chunks or max(c["score"] for c in chunks) < settings.retrieval_min_score
+
     async def retrieve(state: ChatState, *, runtime: Runtime[Context]) -> dict[str, Any]:
-        chunks = await vector_store.search(state["question"], top_k=settings.retrieval_top_k)
+        question = state["question"]
+        chunks = await vector_store.search(question, top_k=settings.retrieval_top_k)
+
+        # Only fall back to a history-rewritten query when the direct search came
+        # back empty or weak, so self-contained questions behave exactly as before.
+        if too_weak(chunks):
+            augmented = augment_query_with_history(question, state.get("messages") or [])
+            if augmented != question:
+                retried = await vector_store.search(augmented, top_k=settings.retrieval_top_k)
+                if not too_weak(retried):
+                    chunks = retried
+
         return {"retrieved": chunks}
 
     return retrieve
@@ -66,13 +72,13 @@ def make_generate(chat_model: ChatModel, settings: Settings) -> Node:
         reply = await chat_model.ainvoke(assemble_messages(state, system))
         answer = reply.text if isinstance(reply.text, str) else str(reply.content)
 
-        from src.rag.prompts import cited_chunks
-
         if chunks and not cited_chunks(answer, chunks):
-            raise UngroundedAnswerError(
-                "generate produced an answer with no citation marker despite "
-                f"{len(chunks)} retrieved chunk(s)"
-            )
+            # The model answered without citing anything -- usually because the
+            # retrieved context did not actually support the question, which the
+            # prompt tells it to say rather than guess. An uncited answer must
+            # never ship as grounded, so drop it (no message appended, empty
+            # answer) and let the router hand the turn to clarify.
+            return {"answer": ""}
 
         # `messages` gets ONLY the new message -- the add-messages reducer appends.
         return {"answer": answer, "messages": [reply]}
@@ -99,6 +105,11 @@ def make_clarify(chat_model: ChatModel, settings: Settings) -> Node:
         return {"answer": answer, "messages": [reply]}
 
     return clarify
+
+
+def route_after_generate(state: ChatState) -> str:
+    """An uncited answer is not shippable -- fall through to the no-answer path."""
+    return "generate" if state.get("answer") else "clarify"
 
 
 def make_route_after_retrieve(settings: Settings) -> Callable[[ChatState], str]:

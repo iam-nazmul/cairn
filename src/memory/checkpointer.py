@@ -17,6 +17,7 @@ from typing import Any
 
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
 from src.config import Settings
 
@@ -27,7 +28,14 @@ async def checkpointer_scope(settings: Settings) -> AsyncIterator[BaseCheckpoint
         yield InMemorySaver()
         return
 
+    if settings.env == "local":
+        # from_conn_string yields inside the context manager and closes the
+        # connection on exit -- build AND invoke the graph inside this scope.
+        async with AsyncSqliteSaver.from_conn_string(settings.sqlite_path) as saver:
+            await saver.setup()  # idempotent; creates the checkpoint tables
+            yield saver
+        return
+
     raise NotImplementedError(
-        f"checkpointer backend for ENV={settings.env!r} is not wired yet "
-        "(SQLite lands in M2, Postgres in M4)"
+        f"checkpointer backend for ENV={settings.env!r} is not wired yet (Postgres lands in M4)"
     )
