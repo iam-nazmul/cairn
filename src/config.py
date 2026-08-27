@@ -57,6 +57,10 @@ class Settings(BaseSettings):
     memory_extraction: Literal["rules", "llm", "off"] = "rules"
     max_long_term_facts: int = 50
 
+    # Observability (SPEC §10). Applies to the "cairn" logger only, so raising it
+    # does not drag in third-party debug noise.
+    log_level: str = "INFO"
+
     # Retrieval + context budget (SPEC §10 cost control).
     retrieval_top_k: int = 4
     retrieval_min_score: float = 0.05

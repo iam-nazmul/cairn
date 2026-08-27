@@ -21,6 +21,7 @@ from src.graph.build import build_graph
 from src.memory.checkpointer import checkpointer_scope
 from src.memory.store import store_scope
 from src.memory.threads import forget_user
+from src.observability import configure_logging
 from src.rag.prompts import cited_chunks
 
 
@@ -72,6 +73,7 @@ class HealthResponse(BaseModel):
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings = get_settings()
+    configure_logging(settings)
     async with checkpointer_scope(settings) as checkpointer, store_scope(settings) as store:
         app.state.settings = settings
         app.state.checkpointer = checkpointer

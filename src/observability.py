@@ -19,13 +19,32 @@ from langchain_core.messages.utils import count_tokens_approximately
 from langgraph.config import get_config
 from langgraph.runtime import Runtime
 
-from src.config import Context
+from src.config import Context, Settings
 from src.graph.state import ChatState
 
 if TYPE_CHECKING:
     from src.graph.nodes import Node
 
 logger = logging.getLogger("cairn.graph")
+
+
+def configure_logging(settings: Settings) -> None:
+    """Make the instrumentation actually emit at runtime.
+
+    Without this the node logs are silent outside the test suite: nothing sets a
+    level on the `cairn` logger, and a propagated INFO record with no root handler
+    falls through to logging's lastResort handler, which only prints WARNING+.
+
+    Root is left at WARNING so third-party libraries stay quiet; ancestor logger
+    levels are not consulted for propagated records, so `cairn` at INFO still
+    reaches the root handler. Propagation is deliberately left on -- pytest's
+    caplog captures through it.
+    """
+    logging.basicConfig(
+        level=logging.WARNING,
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    )
+    logging.getLogger("cairn").setLevel(settings.log_level.upper())
 
 
 def _thread_id() -> str:

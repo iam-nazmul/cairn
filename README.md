@@ -107,7 +107,9 @@ deletion silently becomes partial. A test asserts that list stays complete.
 ## Observability
 
 Every node logs its duration, retrieval hits and scores, facts loaded, and
-approximate answer tokens, tagged with `thread_id`:
+approximate answer tokens, tagged with `thread_id`. Set `LOG_LEVEL` (default
+`INFO`) — it applies to the `cairn` logger only, so raising it does not pull in
+third-party debug noise:
 
 ```
 node=retrieve thread=t_abc ms=0.4 hits=2 doc://kb/expenses-2=0.4 doc://kb/expenses-1=0.2
