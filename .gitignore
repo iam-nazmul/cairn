@@ -1,0 +1,78 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+
+# --- Virtual environments ---
+venv/
+.venv/
+env/
+ENV/
+
+# --- uv ---
+# Keep uv.lock committed; ignore the cache only.
+.uv/
+
+# --- Environment / secrets ---
+# LLM + embeddings API keys, DB URLs (see .env.example)
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# --- Tooling caches ---
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.dmypy.json
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+.tox/
+.nox/
+.hypothesis/
+
+# --- Local memory backends ---
+# SQLite checkpointer/store files (ENV=local)
+*.db
+*.sqlite
+*.sqlite3
+*.db-journal
+*.db-wal
+*.db-shm
+checkpoints/
+
+# --- Local vector store / index artifacts ---
+.chroma/
+chroma/
+*.faiss
+*.index
+data/local/
+
+# --- Notebooks ---
+.ipynb_checkpoints/
+
+# --- Logs ---
+*.log
+logs/
+
+# --- Editors / OS ---
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+Thumbs.db
+
+# --- Claude Code ---
+# Shared config (.claude/settings.json, agents, skills) stays committed.
+.claude/settings.local.json
