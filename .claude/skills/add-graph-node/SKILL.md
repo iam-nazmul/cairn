@@ -14,14 +14,14 @@ from langgraph.runtime import Runtime
 from src.graph.state import ChatState
 from src.config import Context
 
-async def my_node(state: ChatState, runtime: Runtime[Context]) -> dict:
+async def my_node(state: ChatState, *, runtime: Runtime[Context]) -> dict:
     user_id = runtime.context.user_id      # NOT config["configurable"]["user_id"]
     store = runtime.store                  # injected when compiled with store=
     ...
     return {"answer": text}                # only changed keys
 ```
 
-**Signature note:** current LangGraph injects a `Runtime`, not a raw `config`. `CLAUDE.md` still documents the older `def node(state, config)` form — see `.claude/references/langgraph-current-api.md`. `thread_id` is still read from `config["configurable"]`; `user_id` comes from `runtime.context`.
+**Signature note:** current LangGraph injects a `Runtime`, not a raw `config`, and declares it **keyword-only** — `(state, *, runtime)`; a positional `runtime` runs but fails `mypy --strict`. `CLAUDE.md` still documents the older `def node(state, config)` form — see `.claude/references/langgraph-current-api.md`. `thread_id` is still read from `config["configurable"]`; `user_id` comes from `runtime.context`.
 
 Nodes doing I/O (retrieval, LLM, store) are `async`. Keep blocking calls out of the request path.
 

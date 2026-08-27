@@ -102,13 +102,22 @@ class ChatState(TypedDict):
 ```python
 graph = builder.compile(checkpointer=checkpointer, store=store)
 
-config = {"configurable": {"thread_id": thread_id, "user_id": user_id}}
+config = {"configurable": {"thread_id": thread_id}}
 
 # Client sends ONLY the new message; prior turns are restored from the checkpoint.
-result = graph.invoke({"messages": [{"role": "user", "content": text}],
-                       "question": text},
-                      config=config)
+result = await graph.ainvoke({"messages": [{"role": "user", "content": text}],
+                              "question": text},
+                             config=config,
+                             context=Context(user_id=user_id))
 ```
+
+> **Amended at implementation time (M1).** Current LangGraph injects a `Runtime`
+> into nodes rather than a raw `config`: `thread_id` still travels in
+> `config["configurable"]` (where the checkpointer reads it), but `user_id` now
+> travels in a separate `context=` argument, declared to the graph via
+> `StateGraph(ChatState, context_schema=Context)` and read inside a node as
+> `runtime.context.user_id`. Node signature is `async def node(state, *, runtime)`
+> — `runtime` is keyword-only. The core memory claim is unchanged.
 
 The `thread_id` is the key: same `thread_id` ⇒ same restored conversation state; different `thread_id` ⇒ isolated conversation.
 
@@ -177,11 +186,28 @@ Supporting endpoints:
 
 ## 11. Risks & Open Questions
 
-- **Long threads overflow the context window.** Mitigation: trim old messages or summarize the thread into a running summary node (Phase 2).
-- **What extracts long-term facts** in `write_memory` — heuristic, an LLM extraction step, or explicit user commands? Needs a decision.
+- ~~**Long threads overflow the context window.**~~ — **MITIGATED (M4):** history is trimmed to `MAX_HISTORY_TOKENS` before the model call (`assemble_messages`), newest turns kept, oldest dropped. Trimming is prompt-time only: the full thread stays in the checkpoint and `/threads/{id}/history` still returns all of it. Running-summary compaction remains a Phase 2 option if trimming proves lossy.
+- ~~**What extracts long-term facts** in `write_memory`~~ — **RESOLVED (M3): deterministic rules by default, LLM extraction behind a flag.**
+  Explicit `remember that ...` commands plus a tight set of first-person patterns
+  (`my <attribute> is <value>`, `I prefer ...`). Rationale: a bad fact is not wrong
+  once — it is injected into every future prompt on every future thread for that
+  user, so precision beats recall. Rules are also deterministic (testable in the
+  gates without a model) and yield stable upsert keys derived from the normalized
+  attribute, so restating a fact updates it instead of duplicating it (§7.2). LLM
+  extraction has the opposite property: the same fact phrased two ways produces two
+  keys and two rows. Available as `MEMORY_EXTRACTION=llm`; not the default, because
+  it adds a model call to the write path of every turn, including turns containing
+  no facts. Accepted cost: rules miss paraphrases they were not written for.
 - **Corpus ingestion & re-indexing** is out of scope here — confirm the vector store and metadata schema are owned elsewhere.
-- **Citation faithfulness** — need an eval to verify answers are actually grounded in retrieved chunks.
-- **Store backend** — reuse the checkpointer's Postgres instance (with pgvector) or a separate vector DB?
+- ~~**Citation faithfulness**~~ — **ADDRESSED (M1, extended M4):** `tests/test_citations.py` asserts every answer cites a chunk that retrieval actually returned, and that the cited claim appears verbatim in the chunk it points at. An answer the model cannot cite is dropped and re-answered by the no-answer path rather than shipped as grounded.
+- ~~**Store backend**~~ — **RESOLVED (M3): reuse the checkpointer's Postgres with pgvector. One `DATABASE_URL`, not two.**
+  Right-to-be-forgotten (§10) spans both memory systems, and M4 must make "delete
+  this user's threads *and* facts" verifiable; one database makes that one
+  transaction against one credential with one backup story. A separate vector DB
+  adds a second failure domain and a second deletion path — precisely where a
+  partial delete would hide — for no benefit at this scale. Note this concerns the
+  **Store**, not the corpus index: the corpus vector store remains the pluggable
+  seam that §3 assigns elsewhere.
 
 ## 12. Milestones
 

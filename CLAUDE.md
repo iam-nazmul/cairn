@@ -64,17 +64,20 @@ uv run mypy src               # types
 ## How the graph works
 
 - **State** lives in `graph/state.py`. `messages` uses the **add-messages reducer** — nodes *append*, they never overwrite the list. Other fields (`question`, `retrieved`, `long_term_facts`, `answer`) are set per turn.
-- **Invocation always passes config:**
+- **Invocation always passes `thread_id` in config and `user_id` in context:**
   ```python
-  config = {"configurable": {"thread_id": thread_id, "user_id": user_id}}
-  graph.invoke({"messages": [{"role": "user", "content": text}], "question": text}, config)
+  config = {"configurable": {"thread_id": thread_id}}
+  await graph.ainvoke({"messages": [{"role": "user", "content": text}], "question": text},
+                      config, context=Context(user_id=user_id))
   ```
+  `user_id` moved out of `configurable` into `context=` in current LangGraph; see
+  `.claude/references/langgraph-current-api.md`.
   Same `thread_id` = same restored conversation. Different `thread_id` = isolated. **Never** invoke without a `thread_id` — memory silently won't persist.
 - **Compile** with both systems: `builder.compile(checkpointer=checkpointer, store=store)`.
 
 ## Conventions
 
-- **Adding a node:** write a pure `def node(state, config) -> dict` returning only the keys it changes; wire it in `graph/build.py`; never mutate `state` in place.
+- **Adding a node:** write a pure `async def node(state, *, runtime) -> dict` (`runtime` is keyword-only; `user_id` comes from `runtime.context`) returning only the keys it changes; wire it in `graph/build.py`; never mutate `state` in place.
 - **Memory boundaries:** conversation history comes from the checkpointer — do **not** hand-roll a history table or make the client resend past turns. Durable user facts go through `memory/store.py`, never into the checkpointed `messages`.
 - **Retrieval:** `retrieve` must return `{text, source, score}` per chunk so `generate` can cite. Answers without citations are a bug.
 - **Grounding:** `generate` answers from retrieved context + history + long-term facts. Do not let it fall back to model priors when retrieval is empty — route to a clarify/no-answer path instead (see SPEC §6.3).
