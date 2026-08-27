@@ -332,15 +332,33 @@
   </article>
 </template>
 
+<!-- Two sibling buttons, not nested: a button inside a button is invalid markup
+     and the inner one stops receiving clicks. -->
 <template id="tpl-thread">
-  <li>
+  <li class="group flex items-center gap-0.5">
     <button
-      class="w-full truncate rounded-lg px-2.5 py-1.5 text-left font-mono text-xs
+      data-open-thread
+      class="min-w-0 flex-1 truncate rounded-lg px-2.5 py-1.5 text-left font-mono text-xs
              text-stone-600 hover:bg-stone-100 aria-[current=true]:bg-cairn-50
              aria-[current=true]:text-cairn-700 dark:text-stone-400
              dark:hover:bg-stone-800 dark:aria-[current=true]:bg-cairn-700/20
              dark:aria-[current=true]:text-cairn-300"
     ></button>
+    <button
+      data-delete-thread
+      title="Delete this conversation"
+      aria-label="Delete this conversation"
+      class="shrink-0 rounded-md p-1 text-stone-400 opacity-60 hover:bg-red-50
+             hover:text-red-600 hover:opacity-100 focus-visible:opacity-100
+             dark:text-stone-500 dark:hover:bg-red-950/40 dark:hover:text-red-400"
+    >
+      <svg viewBox="0 0 24 24" class="size-3.5" aria-hidden="true">
+        <path
+          fill="currentColor"
+          d="M9 3h6l1 2h4v2H4V5h4zM6 9h12l-1 12H7zm3 2v8h2v-8zm4 0v8h2v-8z"
+        />
+      </svg>
+    </button>
   </li>
 </template>
 

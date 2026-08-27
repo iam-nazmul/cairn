@@ -109,7 +109,13 @@ function renderSources(target, citations) {
   }
 }
 
+/** Emptying the transcript puts the prompts back, rather than a blank pane. */
+function clearTranscript() {
+  els.messages.replaceChildren(els.emptyState);
+}
+
 function addUserMessage(text) {
+  els.emptyState.remove();
   const node = clone("tpl-user");
   node.firstElementChild.textContent = text;
   els.messages.append(node);
@@ -118,6 +124,7 @@ function addUserMessage(text) {
 
 /** Returns handles so a streaming turn can keep writing into the same bubble. */
 function addAssistantMessage() {
+  els.emptyState.remove();
   const node = clone("tpl-assistant");
   const answer = node.querySelector("[data-answer]");
   const sources = node.querySelector("[data-sources]");
@@ -242,7 +249,6 @@ async function send(message) {
   }
 
   setBusy(true);
-  els.emptyState?.remove();
   addUserMessage(message);
 
   const typing = clone("tpl-typing");
@@ -367,7 +373,7 @@ async function newThread({ silent = false } = {}) {
   state.threadId = thread_id;
   store.set("cairn.thread", thread_id);
   els.threadLabel.textContent = thread_id;
-  els.messages.replaceChildren();
+  clearTranscript();
   if (!silent) toast("new conversation");
   markCurrentThread();
 }
@@ -376,7 +382,7 @@ async function openThread(threadId) {
   state.threadId = threadId;
   store.set("cairn.thread", threadId);
   els.threadLabel.textContent = threadId;
-  els.messages.replaceChildren();
+  clearTranscript();
   markCurrentThread();
 
   try {
@@ -396,9 +402,37 @@ async function openThread(threadId) {
 }
 
 function markCurrentThread() {
-  for (const button of els.threadList.querySelectorAll("button")) {
+  for (const button of els.threadList.querySelectorAll("[data-open-thread]")) {
     button.setAttribute("aria-current", String(button.dataset.thread === state.threadId));
   }
+}
+
+/** Delete one conversation. Durable facts survive it -- they are user-scoped. */
+async function deleteThread(threadId) {
+  const confirmed = confirm(
+    `Delete conversation ${threadId}?\n\n` +
+      "Its messages are erased. What cairn remembers about you is kept.",
+  );
+  if (!confirmed) return;
+
+  try {
+    await api(
+      `/users/${encodeURIComponent(state.userId)}/threads/${encodeURIComponent(threadId)}`,
+      { method: "DELETE" },
+    );
+  } catch (error) {
+    toast(error.message);
+    return;
+  }
+
+  if (state.threadId === threadId) {
+    state.threadId = null;
+    store.set("cairn.thread", null);
+    clearTranscript();
+    els.threadLabel.textContent = "no conversation yet";
+  }
+  toast("conversation deleted");
+  refreshSidebar();
 }
 
 // --- sidebar -----------------------------------------------------------------
@@ -413,12 +447,15 @@ async function refreshSidebar() {
   els.threadList.replaceChildren();
   for (const threadId of threads.threads.slice().reverse()) {
     const item = clone("tpl-thread");
-    const button = item.querySelector("button");
-    button.textContent = threadId;
-    button.dataset.thread = threadId;
-    button.addEventListener("click", () => {
+    const open = item.querySelector("[data-open-thread]");
+    open.textContent = threadId;
+    open.dataset.thread = threadId;
+    open.addEventListener("click", () => {
       openThread(threadId);
       closeSidebar();
+    });
+    item.querySelector("[data-delete-thread]").addEventListener("click", () => {
+      deleteThread(threadId);
     });
     els.threadList.append(item);
   }
@@ -506,7 +543,7 @@ els.userId.addEventListener("change", () => {
   // A different person has a different thread list and different durable facts.
   state.threadId = null;
   store.set("cairn.thread", null);
-  els.messages.replaceChildren();
+  clearTranscript();
   els.threadLabel.textContent = "no conversation yet";
   refreshSidebar();
 });
@@ -520,7 +557,7 @@ els.forget.addEventListener("click", async () => {
     const report = await api(`/users/${encodeURIComponent(state.userId)}`, { method: "DELETE" });
     state.threadId = null;
     store.set("cairn.thread", null);
-    els.messages.replaceChildren();
+    clearTranscript();
     els.threadLabel.textContent = "no conversation yet";
     toast(`deleted ${report.threads_deleted} conversations, ${report.facts_deleted} facts`);
     refreshSidebar();

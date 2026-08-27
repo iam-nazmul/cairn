@@ -45,6 +45,14 @@ def streaming_client(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterato
         yield test_client
 
 
+def chat(client: TestClient, thread_id: str, message: str) -> dict[str, object]:
+    response = client.post(
+        "/chat", json={"user_id": USER, "thread_id": thread_id, "message": message}
+    )
+    assert response.status_code == 200, response.text
+    return dict(response.json())
+
+
 def read_events(client: TestClient, message: str, thread_id: str) -> list[dict[str, object]]:
     """Drain POST /chat/stream into decoded SSE events."""
     body = {"user_id": USER, "thread_id": thread_id, "message": message}
@@ -138,6 +146,8 @@ def test_every_data_hook_app_js_binds_to_exists() -> None:
         "data-copy-code",
         "data-download-code",
         "data-copy-answer",
+        "data-open-thread",
+        "data-delete-thread",
     ):
         assert hook in markup, f"{hook} missing from index.html"
         assert hook in script, f"{hook} missing from app.js"
@@ -177,6 +187,59 @@ def test_facts_endpoint_does_not_leak_across_users(client: TestClient) -> None:
     )
 
     assert client.get("/users/u_nobody/facts").json()["facts"] == []
+
+
+# --- deleting one conversation -----------------------------------------------
+
+
+def test_deleting_a_thread_erases_only_that_conversation(client: TestClient) -> None:
+    chat(client, "t-del-keep", "We were discussing invoice 42.")
+    chat(client, "t-del-drop", "We were discussing invoice 99.")
+
+    response = client.delete(f"/users/{USER}/threads/t-del-drop")
+    assert response.status_code == 200
+    assert response.json() == {"user_id": USER, "thread_id": "t-del-drop"}
+
+    assert client.get("/threads/t-del-drop/history").status_code == 404
+    assert client.get("/threads/t-del-keep/history").status_code == 200
+    assert client.get(f"/users/{USER}/threads").json()["threads"] == ["t-del-keep"]
+
+
+def test_deleting_a_thread_keeps_durable_facts(client: TestClient) -> None:
+    """Facts belong to the user, not to the conversation they were learned in."""
+    chat(client, "t-del-facts", "My name is Alice.")
+
+    client.delete(f"/users/{USER}/threads/t-del-facts")
+
+    facts = client.get(f"/users/{USER}/facts").json()["facts"]
+    assert any("alice" in fact.lower() for fact in facts)
+
+
+def test_cannot_delete_another_users_thread(client: TestClient) -> None:
+    """Checkpoints carry no owner, so without the index check any caller could
+    delete any conversation by guessing its id."""
+    chat(client, "t-del-mine", "We were discussing invoice 42.")
+
+    response = client.delete("/users/u_intruder/threads/t-del-mine")
+
+    assert response.status_code == 404
+    assert client.get("/threads/t-del-mine/history").status_code == 200
+    assert client.get(f"/users/{USER}/threads").json()["threads"] == ["t-del-mine"]
+
+
+def test_deleting_an_unknown_thread_is_404(client: TestClient) -> None:
+    assert client.delete(f"/users/{USER}/threads/t-never-existed").status_code == 404
+
+
+def test_deleting_a_thread_leaves_the_index_consistent(client: TestClient) -> None:
+    """A stale index entry would make forget_user report a deletion it never made."""
+    chat(client, "t-del-a", "one")
+    chat(client, "t-del-b", "two")
+    client.delete(f"/users/{USER}/threads/t-del-a")
+
+    report = client.delete(f"/users/{USER}").json()
+
+    assert report["threads_deleted"] == 1
 
 
 def test_forget_clears_what_the_sidebar_shows(client: TestClient) -> None:

@@ -19,7 +19,7 @@ from src.graph.build import build_graph
 from src.memory.checkpointer import checkpointer_scope
 from src.memory.facts import load_user_facts
 from src.memory.store import store_scope
-from src.memory.threads import forget_user, list_threads
+from src.memory.threads import forget_thread, forget_user, list_threads
 from src.observability import configure_logging
 from src.rag.llm import explain, probe, unreachable_hint
 from src.rag.prompts import cited_chunks
@@ -56,6 +56,11 @@ class HistoryMessage(BaseModel):
 class HistoryResponse(BaseModel):
     thread_id: str
     messages: list[HistoryMessage]
+
+
+class ThreadDeletionResponse(BaseModel):
+    user_id: str
+    thread_id: str
 
 
 class DeletionResponse(BaseModel):
@@ -247,6 +252,26 @@ async def user_facts(request: Request, user_id: str) -> FactListResponse:
     settings = request.app.state.settings
     facts = await load_user_facts(request.app.state.store, user_id, settings.max_long_term_facts)
     return FactListResponse(user_id=user_id, facts=facts)
+
+
+@app.delete("/users/{user_id}/threads/{thread_id}")
+async def forget_one_thread(
+    request: Request, user_id: str, thread_id: str
+) -> ThreadDeletionResponse:
+    """Delete one conversation. Durable facts about the user are kept.
+
+    User-scoped on purpose: a bare `/threads/{id}` would delete any conversation
+    for anyone who guessed an id, since checkpoints carry no owner.
+    """
+    deleted = await forget_thread(
+        request.app.state.store, request.app.state.checkpointer, user_id, thread_id
+    )
+    if not deleted:
+        # Same answer whether it never existed or belongs to someone else --
+        # telling them apart would confirm another user's thread ids.
+        raise HTTPException(404, detail=f"no thread {thread_id!r} for user {user_id!r}")
+
+    return ThreadDeletionResponse(user_id=user_id, thread_id=thread_id)
 
 
 @app.delete("/users/{user_id}")

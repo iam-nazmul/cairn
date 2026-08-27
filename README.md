@@ -74,7 +74,8 @@ the model writes them — formatted, so lists, bold and code blocks read as such
 rather than as raw asterisks — with the sources each one used listed underneath.
 
 - **Conversations** in the sidebar. Pick one up where you left it — the history
-  is restored from the checkpoint, not from anything the browser kept.
+  is restored from the checkpoint, not from anything the browser kept. The bin
+  icon deletes one: its messages go, what cairn remembers about you stays.
 - **What cairn remembers** lists the durable facts on file for you. Say *"my
   preferred language is Bengali"* and watch it appear, then start a brand-new
   conversation and see it still there.
@@ -128,6 +129,7 @@ not drawn from your documents.
 | `GET /threads/{id}/history` | Everything said in a conversation |
 | `GET /users/{user_id}/threads` | A user's conversations |
 | `GET /users/{user_id}/facts` | What is remembered about a user |
+| `DELETE /users/{user_id}/threads/{id}` | Erase one conversation, keeping remembered facts |
 | `DELETE /users/{user_id}` | Erase a user: every conversation and every remembered fact |
 | `GET /health` | Check it is running |
 

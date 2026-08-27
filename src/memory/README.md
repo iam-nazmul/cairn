@@ -62,6 +62,17 @@ The checkpointer is keyed by `thread_id` alone and its metadata carries no
 `user_id`, so nothing can answer "which threads belong to this user?". Hence the
 thread index in `(user_id, "threads")` — thread ids only, no message content.
 
+`forget_thread` deletes one conversation: the checkpoint, **and** its entry in the
+thread index. Dropping only the checkpoint leaves the index pointing at a thread
+that no longer exists, and `forget_user` would later count it and report a
+deletion it never made.
+
+It takes a `user_id` and refuses a thread that is not in that user's index. That
+check is the only thing standing between conversations and anyone who guesses an
+id — checkpoints are keyed by `thread_id` alone and carry no owner, so the index
+is the sole record of who a thread belongs to. Durable facts are untouched: they
+belong to the user, not to the conversation they were learned in.
+
 `forget_user` deletes every checkpoint for every thread the user owns, then every
 Store namespace in `USER_NAMESPACES`. **Add a new namespace there whenever user
 data lands somewhere new**, or deletion silently becomes partial — the failure

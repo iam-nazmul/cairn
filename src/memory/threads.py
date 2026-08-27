@@ -44,6 +44,28 @@ async def list_threads(store: BaseStore, user_id: str) -> list[str]:
     return sorted(str(item.value["thread_id"]) for item in items)
 
 
+async def forget_thread(
+    store: BaseStore, checkpointer: BaseCheckpointSaver[Any], user_id: str, thread_id: str
+) -> bool:
+    """Delete one conversation. False if it is not this user's.
+
+    The ownership check is the point: checkpoints are keyed by `thread_id` alone
+    and carry no `user_id`, so without consulting this user's index any caller
+    could delete any conversation by guessing its id.
+
+    Durable facts are deliberately untouched -- they belong to the user, not to
+    the conversation they were learned in. `forget_user` is what erases those.
+    """
+    if thread_id not in await list_threads(store, user_id):
+        return False
+
+    await checkpointer.adelete_thread(thread_id)
+    # Also drop the index entry, or forget_user later counts a thread that is
+    # already gone and reports a deletion it did not make.
+    await store.adelete((user_id, THREADS_NS), thread_id)
+    return True
+
+
 async def forget_user(
     store: BaseStore, checkpointer: BaseCheckpointSaver[Any], user_id: str
 ) -> DeletionReport:

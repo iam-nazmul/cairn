@@ -11,6 +11,7 @@ SPEC §9.
 | `GET /threads/{id}/history` | Straight from the checkpoint. 404 if unknown. |
 | `GET /users/{user_id}/threads` | The user's conversations, from the thread index. |
 | `GET /users/{user_id}/facts` | What the Store holds on the user. |
+| `DELETE /users/{user_id}/threads/{id}` | One conversation. Durable facts kept. |
 | `DELETE /users/{user_id}` | Both memory systems. Idempotent. |
 | `GET /health` | Liveness, backend, provider, provider reachability. |
 | `GET /` | The browser UI. See [The UI](#the-ui). |
