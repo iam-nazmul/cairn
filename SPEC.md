@@ -187,10 +187,27 @@ Supporting endpoints:
 ## 11. Risks & Open Questions
 
 - **Long threads overflow the context window.** Mitigation: trim old messages or summarize the thread into a running summary node (Phase 2).
-- **What extracts long-term facts** in `write_memory` — heuristic, an LLM extraction step, or explicit user commands? Needs a decision.
+- ~~**What extracts long-term facts** in `write_memory`~~ — **RESOLVED (M3): deterministic rules by default, LLM extraction behind a flag.**
+  Explicit `remember that ...` commands plus a tight set of first-person patterns
+  (`my <attribute> is <value>`, `I prefer ...`). Rationale: a bad fact is not wrong
+  once — it is injected into every future prompt on every future thread for that
+  user, so precision beats recall. Rules are also deterministic (testable in the
+  gates without a model) and yield stable upsert keys derived from the normalized
+  attribute, so restating a fact updates it instead of duplicating it (§7.2). LLM
+  extraction has the opposite property: the same fact phrased two ways produces two
+  keys and two rows. Available as `MEMORY_EXTRACTION=llm`; not the default, because
+  it adds a model call to the write path of every turn, including turns containing
+  no facts. Accepted cost: rules miss paraphrases they were not written for.
 - **Corpus ingestion & re-indexing** is out of scope here — confirm the vector store and metadata schema are owned elsewhere.
 - **Citation faithfulness** — need an eval to verify answers are actually grounded in retrieved chunks.
-- **Store backend** — reuse the checkpointer's Postgres instance (with pgvector) or a separate vector DB?
+- ~~**Store backend**~~ — **RESOLVED (M3): reuse the checkpointer's Postgres with pgvector. One `DATABASE_URL`, not two.**
+  Right-to-be-forgotten (§10) spans both memory systems, and M4 must make "delete
+  this user's threads *and* facts" verifiable; one database makes that one
+  transaction against one credential with one backup story. A separate vector DB
+  adds a second failure domain and a second deletion path — precisely where a
+  partial delete would hide — for no benefit at this scale. Note this concerns the
+  **Store**, not the corpus index: the corpus vector store remains the pluggable
+  seam that §3 assigns elsewhere.
 
 ## 12. Milestones
 

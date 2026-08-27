@@ -27,6 +27,9 @@ _BLOCK_RE = re.compile(r"\[S(\d+)\] source=(\S+) score=([0-9.]+)\n(.+?)(?=\n\n\[
 _FACTS_RE = re.compile(r"^- (.+)$", re.M)
 # "My name is Alice", "my preferred language is Bengali"
 _RECALL_RE = re.compile(r"\bmy ([a-z][a-z ]{0,24}?) is ([^.,!?\n]+)", re.I)
+# "We were discussing invoice 42" -- conversational, thread-scoped, and
+# deliberately NOT a durable fact (see .claude/references/memory-placement.md).
+_TOPIC_RE = re.compile(r"\bwe (?:were|are) discussing\s+([^.,!?\n]+)", re.I)
 _SENTENCE_RE = re.compile(r"(?<=[.!?])\s+")
 
 
@@ -68,9 +71,12 @@ class DeterministicChatModel:
         # 1. Remembered context: conversation history first, then long-term facts.
         #    This is memory, not model priors -- allowed even on the clarify path.
         recalled = self._recall(prior, question)
+        topic = self._recall_topic(prior, question)
         if recalled is not None:
             attribute, value = recalled
             parts.append(f"Your {attribute} is {value}.")
+        elif topic is not None:
+            parts.append(f"We were discussing {topic}.")
         else:
             fact = self._matching_fact(facts, question_tokens)
             if fact is not None:
@@ -101,6 +107,17 @@ class DeterministicChatModel:
         for attribute, value in memo.items():
             if attribute in lowered:
                 return attribute, value
+        return None
+
+    @staticmethod
+    def _recall_topic(prior_human_turns: Sequence[str], question: str) -> str | None:
+        """Recall the thread's topic -- checkpointer territory, never the Store."""
+        if "discussing" not in question.lower():
+            return None
+        for turn in reversed(prior_human_turns):
+            match = _TOPIC_RE.search(turn)
+            if match:
+                return match.group(1).strip()
         return None
 
     @staticmethod

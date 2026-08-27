@@ -80,15 +80,15 @@ uv run mypy src
 |---|---|
 | M1 — skeleton: `retrieve → generate`, in-memory checkpointer, cited answers | done |
 | M2 — short-term memory: SQLite checkpointer, `/chat` + threads endpoints | done |
-| M3 — long-term memory: Store, `load_memory` / `write_memory` | not started |
+| M3 — long-term memory: Store, `load_memory` / `write_memory` | done |
 | M4 — hardening: Postgres, observability, trimming, deletion APIs | not started |
 
 ## How a turn is routed
 
 ```
-START → retrieve → generate → END
-             ↘         ↘
-              clarify ←┘ → END
+START → load_memory → retrieve → generate ──────→ write_memory → END
+                          │          │ (uncited)       ▲
+                          └────────→ clarify ──────────┘
 ```
 
 `retrieve` searches the question directly; if that comes back empty or weak it
@@ -100,6 +100,35 @@ Two routes lead to `clarify`, the no-answer path: retrieval found nothing usable
 or `generate` produced an answer it could not cite. An uncited answer is never
 returned as grounded — it is dropped and the turn is re-answered without sources,
 rather than presenting model priors as knowledge.
+
+## Long-term memory
+
+`load_memory` reads this user's durable facts from the Store; `write_memory`
+upserts new ones after the answer. Namespaces are `(user_id, "facts")` and
+`(user_id, "preferences")`, built from the authenticated `user_id` only.
+
+Extraction is **deterministic by default** (`MEMORY_EXTRACTION=rules`): explicit
+`remember that …` commands plus first-person patterns (`my <attribute> is <value>`,
+`I prefer …`). A bad fact is not wrong once — it is injected into every future
+prompt on every future thread for that user, so this errs towards precision. Keys
+are derived from the normalized attribute, which makes writes idempotent upserts:
+restating "my preferred language is Bengali" updates the row rather than adding a
+second one (SPEC §7.2). `MEMORY_EXTRACTION=llm` trades that for recall at the cost
+of a model call on every turn's write path; `off` disables writes.
+
+Semantic lookup over facts (SPEC §7.2's SHOULD) lands in M4 with the pgvector
+store; today the fact set is small and bounded, so `load_memory` lists it.
+
+### Which memory does this belong to?
+
+| Data | Home | Crosses threads? |
+|---|---|---|
+| "We were discussing invoice 42" | Checkpointer | no |
+| "My preferred language is Bengali" | Store | yes, same user only |
+
+The tests assert both directions — a conversational probe must *not* cross
+threads, and a durable fact *must*. Using a durable fact to test thread isolation
+tests the wrong system; see `.claude/references/memory-placement.md`.
 
 ## Seams (deliberately stubbed)
 

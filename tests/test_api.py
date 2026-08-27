@@ -69,17 +69,26 @@ def test_off_corpus_chat_returns_no_citations(client: TestClient) -> None:
 
 def test_chat_remembers_across_turns_on_one_thread(client: TestClient) -> None:
     """The client sends only the new message; history comes from the checkpoint."""
-    chat(client, "t-api-memory", "My name is Alice.")
-    body = chat(client, "t-api-memory", "What's my name?")
+    chat(client, "t-api-memory", "We were discussing invoice 42.")
+    body = chat(client, "t-api-memory", "What were we discussing?")
 
-    assert "alice" in str(body["answer"]).lower()
+    assert "invoice 42" in str(body["answer"]).lower()
 
 
-def test_chat_does_not_leak_across_threads(client: TestClient) -> None:
-    chat(client, "t-api-x", "My name is Alice.")
-    body = chat(client, "t-api-y", "What's my name?")
+def test_chat_does_not_leak_conversation_across_threads(client: TestClient) -> None:
+    """Thread-scoped context stays put. A durable FACT is expected to cross
+    threads -- that is the Store's job, covered in test_long_term_memory.py."""
+    chat(client, "t-api-x", "We were discussing invoice 42.")
+    body = chat(client, "t-api-y", "What were we discussing?")
 
-    assert "alice" not in str(body["answer"]).lower()
+    assert "invoice 42" not in str(body["answer"]).lower()
+
+
+def test_a_durable_fact_crosses_threads_for_the_same_user(client: TestClient) -> None:
+    chat(client, "t-api-fact-a", "My preferred language is Bengali.")
+    body = chat(client, "t-api-fact-b", "What language do I prefer?")
+
+    assert "bengali" in str(body["answer"]).lower()
 
 
 def test_history_returns_the_checkpointed_turns(client: TestClient) -> None:

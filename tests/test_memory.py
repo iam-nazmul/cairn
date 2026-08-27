@@ -26,8 +26,14 @@ from src.memory.store import store_scope
 Graph = CompiledStateGraph[ChatState, Context, ChatState, ChatState]
 
 CONTEXT = Context(user_id="u-1")
-STATEMENT = "My name is Alice."
-QUESTION = "What's my name?"
+
+# Thread-scoped probe: a conversational topic belongs to the checkpointer and is
+# deliberately NOT extracted as a durable fact, so it cannot cross threads via
+# the Store. Using "My name is Alice" here would test the wrong system -- that IS
+# a durable fact, so from M3 on it legitimately reaches other threads.
+# See .claude/references/memory-placement.md.
+STATEMENT = "We were discussing invoice 42."
+QUESTION = "What were we discussing?"
 
 
 def turn(text: str) -> dict[str, object]:
@@ -62,12 +68,12 @@ async def test_thread_continuity(backend: str, tmp_path: Path) -> None:
         await graph.ainvoke(turn(STATEMENT), config, context=CONTEXT)
         out = await graph.ainvoke(turn(QUESTION), config, context=CONTEXT)
 
-    assert "alice" in out["answer"].lower()
+    assert "invoice 42" in out["answer"].lower()
 
 
 @pytest.mark.parametrize("backend", BACKENDS)
 async def test_thread_isolation(backend: str, tmp_path: Path) -> None:
-    """Different thread_id: no leakage, even for the same user."""
+    """Different thread_id: conversation state does not leak, even for one user."""
     async with graph_for(settings_for(backend, tmp_path)) as graph:
         await graph.ainvoke(
             turn(STATEMENT), {"configurable": {"thread_id": "t-a"}}, context=CONTEXT
@@ -76,7 +82,7 @@ async def test_thread_isolation(backend: str, tmp_path: Path) -> None:
             turn(QUESTION), {"configurable": {"thread_id": "t-b"}}, context=CONTEXT
         )
 
-    assert "alice" not in out["answer"].lower()
+    assert "invoice 42" not in out["answer"].lower()
 
 
 @pytest.mark.parametrize("backend", BACKENDS)
@@ -113,7 +119,7 @@ async def test_durability_across_a_process_restart(tmp_path: Path) -> None:
 
         out = await graph_b.ainvoke(turn(QUESTION), config, context=CONTEXT)
 
-    assert "alice" in out["answer"].lower()
+    assert "invoice 42" in out["answer"].lower()
 
 
 async def test_sqlite_file_is_actually_written(tmp_path: Path) -> None:

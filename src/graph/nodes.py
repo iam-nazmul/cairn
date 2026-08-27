@@ -15,10 +15,18 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from typing import Any, Protocol
 
+from langchain.messages import HumanMessage, SystemMessage
 from langgraph.runtime import Runtime
 
 from src.config import Context, Settings
 from src.graph.state import ChatState, RetrievedChunk
+from src.memory.facts import (
+    FACTS_NS,
+    LLM_EXTRACTION_PROMPT,
+    PREFERENCES_NS,
+    extract_facts,
+    parse_llm_facts,
+)
 from src.rag.llm import ChatModel
 from src.rag.prompts import assemble_messages, build_system_prompt, cited_chunks
 from src.rag.retrieve import VectorStore, augment_query_with_history
@@ -36,6 +44,68 @@ class Node(Protocol):
     def __call__(
         self, state: ChatState, *, runtime: Runtime[Context]
     ) -> Awaitable[dict[str, Any]]: ...
+
+
+def make_load_memory(settings: Settings) -> Node:
+    """Read this user's durable facts from the Store (SPEC §6.2). No-op if none.
+
+    Facts are listed rather than semantically searched: the set is small and
+    bounded, and listing is deterministic. Semantic lookup (SPEC §7.2's SHOULD)
+    arrives in M4 with the pgvector-backed Postgres store.
+    """
+
+    async def load_memory(state: ChatState, *, runtime: Runtime[Context]) -> dict[str, Any]:
+        store = runtime.store
+        if store is None:
+            return {"long_term_facts": []}
+
+        user_id = runtime.context.user_id
+        facts: list[str] = []
+        for namespace in (FACTS_NS, PREFERENCES_NS):
+            # Namespaced by the authenticated user_id ONLY -- never a request field.
+            items = await store.asearch((user_id, namespace), limit=settings.max_long_term_facts)
+            facts.extend(str(item.value.get("text", "")) for item in items)
+
+        return {"long_term_facts": sorted(f for f in facts if f)}
+
+    return load_memory
+
+
+def make_write_memory(settings: Settings, chat_model: ChatModel) -> Node:
+    """Upsert durable facts from this turn into the Store (SPEC §6.2, §7.2).
+
+    Only the user's own turn is scanned. Nothing conversational goes here: that
+    belongs to the checkpointer.
+    """
+
+    async def write_memory(state: ChatState, *, runtime: Runtime[Context]) -> dict[str, Any]:
+        store = runtime.store
+        if store is None or settings.memory_extraction == "off":
+            return {}
+
+        question = state["question"]
+        if settings.memory_extraction == "llm":
+            reply = await chat_model.ainvoke(
+                [
+                    SystemMessage(content=LLM_EXTRACTION_PROMPT),
+                    HumanMessage(content=question),
+                ]
+            )
+            text = reply.text if isinstance(reply.text, str) else str(reply.content)
+            facts = parse_llm_facts(text)
+        else:
+            facts = extract_facts(question)
+
+        user_id = runtime.context.user_id
+        for fact in facts:
+            # Upsert on a stable key: a fresh uuid per turn would duplicate
+            # facts instead of updating them (SPEC §7.2).
+            await store.aput((user_id, fact.namespace), fact.key, {"text": fact.text})
+
+        # Writes nothing to state: durable facts must never enter `messages`.
+        return {}
+
+    return write_memory
 
 
 def make_retrieve(vector_store: VectorStore, settings: Settings) -> Node:

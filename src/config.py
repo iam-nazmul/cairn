@@ -51,6 +51,12 @@ class Settings(BaseSettings):
     sqlite_path: str = "cairn-checkpoints.db"
     database_url: str = ""
 
+    # Long-term memory (SPEC §11, resolved in M3). "rules" is deterministic and
+    # runs in the gates without a model; "llm" trades precision and stable upsert
+    # keys for recall, at one extra model call on every turn's write path.
+    memory_extraction: Literal["rules", "llm", "off"] = "rules"
+    max_long_term_facts: int = 50
+
     # Retrieval + context budget (SPEC §10 cost control).
     retrieval_top_k: int = 4
     retrieval_min_score: float = 0.05
