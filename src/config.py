@@ -34,9 +34,18 @@ class Settings(BaseSettings):
     env: Env = "dev"
 
     # LLM seam. "fake" is a deterministic scripted model used by the test suite
-    # and offline runs; see src/rag/llm.py.
+    # and offline runs; "ollama" talks to a local Ollama server; anything else
+    # goes through LangChain's init_chat_model. See src/rag/llm.py.
     llm_provider: str = "fake"
     llm_model: str = ""
+    llm_temperature: float = 0.0
+
+    # Ollama. num_ctx must comfortably hold the system prompt (retrieved context
+    # + long-term facts) plus the checkpointed history; Ollama's own default of
+    # 4096 silently truncates the oldest tokens, which looks exactly like the
+    # chatbot "forgetting" earlier turns.
+    ollama_base_url: str = "http://localhost:11434"
+    ollama_num_ctx: int = 8192
 
     # Backend locations (consumed in M2/M4).
     sqlite_path: str = "cairn-checkpoints.db"

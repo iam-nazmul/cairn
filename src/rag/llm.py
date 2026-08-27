@@ -114,13 +114,39 @@ class DeterministicChatModel:
 
 
 def get_chat_model(settings: Settings) -> ChatModel:
+    """Resolve the configured provider.
+
+    Real chat models are narrowed with `cast`: their `ainvoke` is a structural
+    superset of `ChatModel` (extra optional kwargs), which Protocol matching
+    does not accept.
+    """
     if settings.llm_provider == "fake":
         return DeterministicChatModel()
 
+    if not settings.llm_model:
+        raise ValueError(
+            f"LLM_MODEL is required when LLM_PROVIDER={settings.llm_provider!r} "
+            "(e.g. LLM_MODEL=llama3.1 for Ollama)"
+        )
+
+    if settings.llm_provider == "ollama":
+        from langchain_ollama import ChatOllama
+
+        return cast(
+            ChatModel,
+            ChatOllama(
+                model=settings.llm_model,
+                base_url=settings.ollama_base_url,
+                temperature=settings.llm_temperature,
+                num_ctx=settings.ollama_num_ctx,
+            ),
+        )
+
     from langchain.chat_models import init_chat_model
 
-    # init_chat_model returns a BaseChatModel; its ainvoke is a structural
-    # superset of ChatModel (extra optional kwargs), which Protocol matching
-    # does not accept, so narrow it explicitly.
-    model = init_chat_model(settings.llm_model, model_provider=settings.llm_provider)
+    model = init_chat_model(
+        settings.llm_model,
+        model_provider=settings.llm_provider,
+        temperature=settings.llm_temperature,
+    )
     return cast(ChatModel, model)
