@@ -32,6 +32,43 @@ the user -- that is remembered context, not a guess. Otherwise, ask the user one
 short clarifying question."""
 
 
+REFINE_SYSTEM = """You are refining a search query against a document index.
+
+You will see the user's question, the queries already tried, and what those \
+returned. Write ONE new search query that is likely to surface what is still \
+missing -- different wording, a narrower aspect, or a term the documents would \
+use rather than the user's phrasing.
+
+Output the query alone: no quotes, no explanation, no prefix."""
+
+_MAX_QUERY_CHARS = 200
+
+
+def build_refine_prompt(question: str, tried: list[str], chunks: list[RetrievedChunk]) -> str:
+    found = (
+        "\n".join(f"- {c['source']} (score {c['score']}): {c['text'][:200]}" for c in chunks)
+        or "- nothing yet"
+    )
+    return f"Question: {question}\n\nQueries tried:\n" + (
+        "\n".join(f"- {t}" for t in tried) + f"\n\nFound so far:\n{found}"
+    )
+
+
+def parse_refined_query(reply: str, question: str, tried: list[str]) -> str:
+    """First usable line of the model's answer, or the question as a fallback.
+
+    A model that ignores the format is common; an unusable query is not a failure
+    worth aborting the turn for, because a repeated search simply adds no new
+    sources and the router stops on its own.
+    """
+    seen = {t.strip().lower() for t in tried}
+    for line in reply.splitlines():
+        candidate = line.strip().strip("\"'`").removeprefix("Query:").strip()
+        if candidate and len(candidate) <= _MAX_QUERY_CHARS and candidate.lower() not in seen:
+            return candidate
+    return question
+
+
 def format_facts(facts: list[str]) -> str:
     if not facts:
         return "Known facts about the user: (none on file)"

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Hashable
 from typing import Any
 
 from langgraph.checkpoint.base import BaseCheckpointSaver
@@ -14,6 +15,7 @@ from src.graph.nodes import (
     make_clarify,
     make_generate,
     make_load_memory,
+    make_research,
     make_retrieve,
     make_route_after_retrieve,
     make_write_memory,
@@ -42,6 +44,9 @@ def build_graph(
 
     builder.add_node("load_memory", instrument("load_memory", make_load_memory(settings)))
     builder.add_node("retrieve", instrument("retrieve", make_retrieve(vector_store, settings)))
+    builder.add_node(
+        "research", instrument("research", make_research(vector_store, chat_model, settings))
+    )
     builder.add_node("generate", instrument("generate", make_generate(chat_model, settings)))
     builder.add_node("clarify", instrument("clarify", make_clarify(chat_model, settings)))
     builder.add_node(
@@ -50,11 +55,18 @@ def build_graph(
 
     builder.add_edge(START, "load_memory")
     builder.add_edge("load_memory", "retrieve")
-    builder.add_conditional_edges(
-        "retrieve",
-        make_route_after_retrieve(settings),
-        {"generate": "generate", "clarify": "clarify"},
-    )
+    # One router on both nodes: `research` loops back through the same decision,
+    # so the budget and the grounding verdict cannot drift apart.
+    route_after_retrieve = make_route_after_retrieve(settings)
+    # Annotated because dict is invariant in its key type: a bare dict[str, str]
+    # is not the dict[Hashable, str] add_conditional_edges declares.
+    destinations: dict[Hashable, str] = {
+        "generate": "generate",
+        "clarify": "clarify",
+        "research": "research",
+    }
+    builder.add_conditional_edges("retrieve", route_after_retrieve, destinations)
+    builder.add_conditional_edges("research", route_after_retrieve, destinations)
     # generate -> clarify when the model returned an answer it could not cite.
     builder.add_conditional_edges(
         "generate", route_after_generate, {"generate": "write_memory", "clarify": "clarify"}

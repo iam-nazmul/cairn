@@ -24,6 +24,13 @@ const els = {
   menu: $("menu"),
   sidebar: $("sidebar"),
   scrim: $("scrim"),
+  mode: $("mode"),
+  modeHint: $("mode-hint"),
+};
+
+const MODE_HINTS = {
+  chat: "One search, then an answer.",
+  agent: "Searches repeatedly, refining the query, before answering.",
 };
 
 const store = {
@@ -46,6 +53,7 @@ const store = {
 const state = {
   userId: store.get("cairn.user", `u_${Math.random().toString(36).slice(2, 10)}`),
   threadId: store.get("cairn.thread", null),
+  mode: store.get("cairn.mode", "chat") === "agent" ? "agent" : "chat",
   busy: false,
 };
 
@@ -131,6 +139,27 @@ function addAssistantMessage() {
   els.messages.append(node);
   scrollToBottom();
   return { answer, sources };
+}
+
+/** Agent mode only: a line showing a search it ran. */
+function addSearchNote(query, sources, before) {
+  els.emptyState.remove();
+  const node = clone("tpl-search");
+  node.querySelector("[data-query]").textContent = `“${query}”`;
+  node.querySelector("[data-sources]").textContent =
+    sources === 1 ? "· 1 source" : `· ${sources} sources`;
+  // Before the typing indicator, so it stays the last thing on screen.
+  els.messages.insertBefore(node, before ?? null);
+  scrollToBottom();
+}
+
+function setMode(mode) {
+  state.mode = mode;
+  store.set("cairn.mode", mode);
+  for (const button of els.mode.querySelectorAll("[data-mode]")) {
+    button.setAttribute("aria-checked", String(button.dataset.mode === mode));
+  }
+  els.modeHint.textContent = MODE_HINTS[mode];
 }
 
 function scrollToBottom(behavior = "smooth") {
@@ -293,6 +322,7 @@ async function send(message) {
         user_id: state.userId,
         thread_id: state.threadId,
         message,
+        mode: state.mode,
       }),
     });
     if (!response.ok) {
@@ -304,7 +334,9 @@ async function send(message) {
     }
 
     for await (const event of readEvents(response)) {
-      if (event.type === "token") {
+      if (event.type === "search") {
+        addSearchNote(event.query, event.sources, typing);
+      } else if (event.type === "token") {
         streamed += event.text;
         write();
       } else if (event.type === "restart") {
@@ -574,6 +606,10 @@ els.themeToggle.addEventListener("click", () => {
 els.menu.addEventListener("click", openSidebar);
 els.scrim.addEventListener("click", closeSidebar);
 
+for (const button of els.mode.querySelectorAll("[data-mode]")) {
+  button.addEventListener("click", () => setMode(button.dataset.mode));
+}
+
 // Delegated: answers are re-rendered on every streamed frame, so per-button
 // listeners would be attached and thrown away dozens of times per turn.
 els.messages.addEventListener("click", async (event) => {
@@ -597,6 +633,7 @@ els.messages.addEventListener("click", async (event) => {
 
 els.userId.value = state.userId;
 store.set("cairn.user", state.userId);
+setMode(state.mode);
 els.threadLabel.textContent = state.threadId ?? "no conversation yet";
 
 refreshHealth();

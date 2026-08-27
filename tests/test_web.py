@@ -124,6 +124,7 @@ def test_every_template_id_app_js_binds_to_exists() -> None:
         "tpl-fact",
         "tpl-error",
         "tpl-code",
+        "tpl-search",
         "tpl-toast",
     ):
         assert f'id="{template_id}"' in markup
@@ -148,6 +149,8 @@ def test_every_data_hook_app_js_binds_to_exists() -> None:
         "data-copy-answer",
         "data-open-thread",
         "data-delete-thread",
+        "data-mode",
+        "data-query",
     ):
         assert hook in markup, f"{hook} missing from index.html"
         assert hook in script, f"{hook} missing from app.js"
@@ -450,6 +453,16 @@ def test_host_net_overlay_points_everything_at_localhost() -> None:
     assert "@localhost:5433" in overlay
 
 
+def test_the_host_net_overlay_documents_how_to_make_it_stick() -> None:
+    """Passing both -f files every time is the trap: one plain `docker compose up`
+    recreates the container on bridge networking and every turn starts failing.
+    COMPOSE_FILE in .env is the fix, so the guidance has to be discoverable."""
+    setting = "COMPOSE_FILE=docker-compose.yml:docker-compose.host-net.yml"
+
+    assert setting in Path(".env.example").read_text()
+    assert setting in Path("docker-compose.host-net.yml").read_text()
+
+
 def test_explain_passes_through_a_failure_that_is_not_a_connection_problem() -> None:
     settings = Settings(env="dev", llm_provider="ollama", llm_model="llama3.1")
 
@@ -469,6 +482,79 @@ def test_explain_sees_through_a_wrapped_connection_error() -> None:
             raise RuntimeError("during task with name 'clarify'") from cause
     except RuntimeError as wrapped:
         assert explain(wrapped, settings) == unreachable_hint(settings)
+
+
+# --- chat mode vs agent mode -------------------------------------------------
+
+
+def test_chat_is_the_default_mode(client: TestClient) -> None:
+    """Callers that predate the setting keep the single-retrieval behaviour."""
+    events = read_events(client, "When are expense reports due?", "t-mode-default")
+
+    assert [e for e in events if e["type"] == "search"] == []
+
+
+def test_agent_mode_streams_the_searches_it_ran(client: TestClient) -> None:
+    body = {
+        "user_id": USER,
+        "thread_id": "t-mode-agent",
+        "message": "When are expense reports due?",
+        "mode": "agent",
+    }
+    with client.stream("POST", "/chat/stream", json=body) as response:
+        assert response.status_code == 200, response.read()
+        raw = "".join(response.iter_text())
+
+    events = [
+        json.loads(block.removeprefix("data:").strip())
+        for block in raw.split("\n\n")
+        if block.strip()
+    ]
+    searches = [e for e in events if e["type"] == "search"]
+
+    assert searches, "agent mode should report the searches it ran"
+    assert all(e["query"] for e in searches)
+    assert events[-1]["type"] == "final"
+
+
+def test_agent_mode_still_returns_citations(client: TestClient) -> None:
+    response = client.post(
+        "/chat",
+        json={
+            "user_id": USER,
+            "thread_id": "t-mode-cite",
+            "message": "How long do I have to submit an expense report?",
+            "mode": "agent",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["citations"], "agent mode does not relax grounding"
+
+
+def test_an_unknown_mode_is_rejected(client: TestClient) -> None:
+    response = client.post(
+        "/chat",
+        json={"user_id": USER, "thread_id": "t-mode-bad", "message": "hi", "mode": "wizard"},
+    )
+
+    assert response.status_code == 422
+
+
+def test_a_thread_can_mix_both_modes(client: TestClient) -> None:
+    """Mode is per turn, not per conversation, so history has to survive a switch."""
+    client.post(
+        "/chat",
+        json={
+            "user_id": USER,
+            "thread_id": "t-mode-mixed",
+            "message": "We were discussing invoice 42.",
+            "mode": "agent",
+        },
+    )
+    body = chat(client, "t-mode-mixed", "What were we discussing?")
+
+    assert "invoice 42" in str(body["answer"]).lower()
 
 
 def test_a_provider_that_does_not_stream_arrives_in_one_piece(client: TestClient) -> None:

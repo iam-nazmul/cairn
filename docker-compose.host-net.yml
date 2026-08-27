@@ -2,6 +2,18 @@
 #
 #   docker compose -f docker-compose.yml -f docker-compose.host-net.yml up --build
 #
+# Passing both files EVERY time is the catch: a plain `docker compose up` builds
+# from docker-compose.yml alone and silently recreates the container on bridge
+# networking, where OLLAMA_BASE_URL becomes host.docker.internal and every turn
+# fails. Compose reads COMPOSE_FILE from the project's .env, so set it there once
+# and plain commands pick this file up on their own:
+#
+#   COMPOSE_FILE=docker-compose.yml:docker-compose.host-net.yml
+#
+# Switching a container between bridge and host networking also needs
+# --force-recreate when the image itself has not changed; compose does not
+# always notice the change on its own.
+#
 # Use this when Ollama runs on the host with its default 127.0.0.1 bind and you
 # would rather not change that. Sharing the host's network namespace makes the
 # container's `localhost` the host's, so it reaches Ollama with no OLLAMA_HOST

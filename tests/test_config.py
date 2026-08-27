@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import pathlib
+import re
 
 import pytest
 from langgraph.checkpoint.memory import InMemorySaver
@@ -20,12 +21,24 @@ Graph = CompiledStateGraph[ChatState, Context, ChatState, ChatState]
 ENV_EXAMPLE = pathlib.Path(__file__).parent.parent / ".env.example"
 
 
+# A bare assignment, commented out or not. Anchored so prose that merely mentions
+# FOO=bar mid-sentence does not count as documenting a setting.
+_ASSIGNMENT_RE = re.compile(r"^#?\s*([A-Z][A-Z0-9_]*)=")
+
+
 def documented_keys() -> set[str]:
+    """Keys `.env.example` documents -- a commented-out assignment counts.
+
+    One setting must stay unassigned: `OLLAMA_BASE_URL` has no value that is
+    right everywhere, because `localhost` means this machine to uvicorn and the
+    container to a container. Shipping either one misconfigures somebody, so the
+    file explains it and assigns nothing. Documented is not the same as set.
+    """
     keys: set[str] = set()
     for line in ENV_EXAMPLE.read_text().splitlines():
-        line = line.strip()
-        if line and not line.startswith("#") and "=" in line:
-            keys.add(line.split("=", 1)[0].strip())
+        match = _ASSIGNMENT_RE.match(line.strip())
+        if match:
+            keys.add(match.group(1))
     return keys
 
 
@@ -35,13 +48,39 @@ def test_env_example_documents_every_setting() -> None:
     assert not missing, f".env.example is missing: {sorted(missing)}"
 
 
+def test_env_example_does_not_assign_ollama_base_url() -> None:
+    """No value is right everywhere: `localhost` is this machine to uvicorn and
+    the container to a container. An assignment here reads as though it also
+    configures Docker, where Compose sets the address and this is ignored."""
+    for line in ENV_EXAMPLE.read_text().splitlines():
+        assert not line.strip().startswith("OLLAMA_BASE_URL="), line
+
+
+def test_env_example_names_the_docker_override() -> None:
+    """Whoever wants to repoint a container looks here first; the knob they need
+    is spelled differently, so the file has to say so."""
+    assert "DOCKER_OLLAMA_BASE_URL" in ENV_EXAMPLE.read_text()
+
+
+# Documented in .env.example but never read by Settings: the file has to carry
+# them because that is where the tool that reads them looks.
+NOT_APP_SETTINGS = {
+    # Consumed by the test suite.
+    "POSTGRES_TEST_URI",
+    "CAIRN_TEST_OLLAMA",
+    "CAIRN_TEST_OLLAMA_MODEL",
+    # Read by Docker Compose itself, which loads .env before the app exists.
+    # DOCKER_OLLAMA_BASE_URL becomes the container's OLLAMA_BASE_URL; it is named
+    # differently so a host value here cannot leak into the container.
+    "COMPOSE_FILE",
+    "DOCKER_OLLAMA_BASE_URL",
+}
+
+
 def test_env_example_has_no_stale_keys() -> None:
     """Guards the other direction: a removed setting left behind as documentation."""
-    known = {name.upper() for name in Settings.model_fields} | {
-        "POSTGRES_TEST_URI",
-        "CAIRN_TEST_OLLAMA",
-        "CAIRN_TEST_OLLAMA_MODEL",
-    }
+    known = {name.upper() for name in Settings.model_fields} | NOT_APP_SETTINGS
+
     assert not documented_keys() - known
 
 

@@ -10,6 +10,11 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 Env = Literal["dev", "local", "prod"]
 
+# "chat" retrieves once. "agent" may search repeatedly, refining the query from
+# what came back. Both must cite: the mode changes how evidence is gathered, not
+# whether an answer needs any.
+Mode = Literal["chat", "agent"]
+
 
 @dataclass(frozen=True)
 class Context:
@@ -22,6 +27,8 @@ class Context:
     """
 
     user_id: str
+    # Per turn, not per thread: one conversation can mix both.
+    mode: Mode = "chat"
 
 
 class Settings(BaseSettings):
@@ -59,6 +66,14 @@ class Settings(BaseSettings):
     max_context_chars: int = 4000
     # Trimmed before the LLM call only; the checkpoint keeps every turn.
     max_history_tokens: int = 1500
+
+    # Agent mode. Each extra search costs a model call to rewrite the query, so
+    # the budget is the cost ceiling for a turn (SPEC §10) -- it counts the first
+    # search too, so 1 makes agent mode behave like chat.
+    agent_max_searches: int = 3
+    # Stop early once retrieval is already this good; refining past it spends a
+    # model call to re-find what has been found.
+    agent_good_score: float = 0.5
 
 
 @lru_cache(maxsize=1)

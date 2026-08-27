@@ -29,14 +29,15 @@ class _NoCitationModel:
         return AIMessage(content="Receipts are required over 25 dollars.")
 
 
-async def test_retrieve_sets_only_the_retrieved_key(settings: Settings) -> None:
+async def test_retrieve_returns_only_the_keys_it_changes(settings: Settings) -> None:
     node = make_retrieve(InMemoryVectorStore(), settings)
     state = make_state(question="expense report receipts")
 
     result = await node(state, runtime=make_runtime())
 
-    assert set(result) == {"retrieved"}
+    assert set(result) == {"retrieved", "searches", "new_hits"}
     assert result["retrieved"]
+    assert result["searches"] == ["expense report receipts"], "the query it ran is the log"
     assert state["retrieved"] == [], "node must not mutate the state it was handed"
 
 
@@ -105,18 +106,18 @@ async def test_clarify_still_uses_conversation_memory(settings: Settings) -> Non
 
 def test_route_sends_empty_retrieval_to_clarify(settings: Settings) -> None:
     route = make_route_after_retrieve(settings)
-    assert route(make_state(retrieved=[])) == "clarify"
+    assert route(make_state(retrieved=[]), make_runtime()) == "clarify"
 
 
 def test_route_sends_low_confidence_retrieval_to_clarify(settings: Settings) -> None:
     route = make_route_after_retrieve(settings)
     weak = RetrievedChunk(text="...", source="doc://kb/x", score=settings.retrieval_min_score / 2)
-    assert route(make_state(retrieved=[weak])) == "clarify"
+    assert route(make_state(retrieved=[weak]), make_runtime()) == "clarify"
 
 
 def test_route_sends_confident_retrieval_to_generate(settings: Settings) -> None:
     route = make_route_after_retrieve(settings)
-    assert route(make_state(retrieved=[CHUNK])) == "generate"
+    assert route(make_state(retrieved=[CHUNK]), make_runtime()) == "generate"
 
 
 def test_deterministic_model_satisfies_the_chat_model_protocol() -> None:

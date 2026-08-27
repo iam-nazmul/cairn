@@ -5,7 +5,7 @@ SPEC §9.
 
 | Endpoint | Notes |
 |---|---|
-| `POST /chat` | One turn. Body carries `user_id`, `thread_id`, `message`. |
+| `POST /chat` | One turn. Body carries `user_id`, `thread_id`, `message`, `mode`. |
 | `POST /chat/stream` | The same turn as SSE. See [Streaming](#streaming). |
 | `POST /threads` | Mints an id; nothing persists until the first turn. |
 | `GET /threads/{id}/history` | Straight from the checkpoint. 404 if unknown. |
@@ -59,6 +59,7 @@ SSE events, one JSON object per `data:` line:
 
 | Event | Meaning |
 |---|---|
+| `search` | Agent mode only: a query it ran, and the source count so far. |
 | `token` | A fragment of the answer. Append it. |
 | `restart` | Discard everything drawn so far and start the bubble again. |
 | `final` | The authoritative `answer` + `citations`. Always sent last. |
@@ -84,6 +85,17 @@ broken — the browser needs no separate path, and neither does `test_web.py`.
 
 `final` is always sent even when tokens streamed, because `citations` can only be
 computed once the answer is whole.
+
+`search` events are emitted **only** in agent mode, so a chat turn's stream is
+exactly what it was before the mode existed. They are derived from `searches`
+growing in the `values` payloads — no extra stream mode. Agent mode can spend
+several seconds and two model calls before the first token, and an idle spinner
+for that long reads as a hang. They are live-turn only: searches are not
+checkpointed as messages, so reopening a thread from history does not replay them.
+
+`mode` defaults to `"chat"`, so callers written before it are unaffected. An
+unknown mode is a 422 from the `Mode` literal rather than a silent fallback.
+See [src/graph/README.md](../graph/README.md) for the loop and its stop rules.
 
 ## When the provider is down
 

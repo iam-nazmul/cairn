@@ -14,7 +14,10 @@ must do. Module-level guidance lives in each module's `README.md`.
                            │  load_memory ◀────────┐                         │
                            │     │                 │                         │
                            │     ▼                 │                         │
-   VectorStore (seam) ───▶ │  retrieve             │                         │
+   VectorStore (seam) ───▶ │  retrieve ◀──┐        │                         │
+                           │     │        │        │                         │
+                           │     ├─ agent ┴ research (rewrite query, search   │
+                           │     │          again, merge) -- chat never loops │
                            │     │ └─ empty/weak ──┼──────┐                  │
                            │     ▼                 │      ▼                  │
    ChatModel (seam) ─────▶ │  generate             │   clarify               │
@@ -96,6 +99,12 @@ POSTGRES_TEST_URI=postgresql://cairn:cairn@localhost:5433/cairn?sslmode=disable 
   `clarify` nodes — `write_memory` calls a model too.
 - Keep `POST /chat/stream` and `POST /chat` interchangeable. A test asserts they
   return the same answer and citations; do not let one grow behaviour.
+- Agent mode changes how evidence is gathered, never what may be answered. The
+  `RETRIEVAL_MIN_SCORE` floor and the citation requirement are identical in both
+  modes; a test pins that. Cap extra searches with `AGENT_MAX_SEARCHES` — each one
+  is a model call.
+- `mode` goes in `context=` beside `user_id`, never in `configurable`. It is per
+  turn: one thread may mix both.
 
 **Dependencies**
 - Do not bump `langgraph` or any `langgraph-checkpoint-*` package without

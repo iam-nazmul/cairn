@@ -22,7 +22,7 @@
 # Prefer not to touch the host? Run Ollama in Compose instead -- self-contained,
 # but it re-downloads the models into a volume:
 #
-#   OLLAMA_BASE_URL=http://ollama:11434 docker compose --profile ollama up --build
+#   DOCKER_OLLAMA_BASE_URL=http://ollama:11434 docker compose --profile ollama up --build
 #   docker compose exec ollama ollama pull llama3.1
 #
 # Or skip the LLM entirely for a smoke test of the plumbing:

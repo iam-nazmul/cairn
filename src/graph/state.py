@@ -24,3 +24,9 @@ class ChatState(TypedDict):
     retrieved: list[RetrievedChunk]
     long_term_facts: list[str]
     answer: str
+    # Agent mode (SPEC §13.2). Every query tried this turn, oldest first;
+    # its length is the search budget spent.
+    searches: list[str]
+    # Sources the most recent search added that earlier ones had not. Zero means
+    # refining stopped paying for itself, which is a reason to stop.
+    new_hits: int

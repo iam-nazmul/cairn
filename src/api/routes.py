@@ -14,7 +14,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from src.api import web
-from src.config import Context, get_settings
+from src.config import Context, Mode, get_settings
 from src.graph.build import build_graph
 from src.memory.checkpointer import checkpointer_scope
 from src.memory.facts import load_user_facts
@@ -31,6 +31,8 @@ class ChatRequest(BaseModel):
     user_id: str = Field(min_length=1)
     thread_id: str = Field(min_length=1)
     message: str = Field(min_length=1)
+    # Defaults to the single-retrieval path, so existing callers are unaffected.
+    mode: Mode = "chat"
 
 
 class Citation(BaseModel):
@@ -134,7 +136,7 @@ def _turn(body: ChatRequest) -> tuple[dict[str, Any], dict[str, Any], Context]:
         {"messages": [{"role": "user", "content": body.message}], "question": body.message},
         # thread_id in config (where the checkpointer reads it); user_id in context.
         {"configurable": {"thread_id": body.thread_id}},
-        Context(user_id=body.user_id),
+        Context(user_id=body.user_id, mode=body.mode),
     )
 
 
@@ -186,6 +188,7 @@ async def chat_stream(request: Request, body: ChatRequest) -> StreamingResponse:
     async def events() -> AsyncIterator[str]:
         result: dict[str, Any] = {}
         streaming_node = ""
+        reported_searches = 0
         try:
             async for part in graph.astream(
                 payload,
@@ -196,6 +199,19 @@ async def chat_stream(request: Request, body: ChatRequest) -> StreamingResponse:
             ):
                 if part["type"] == "values":
                     result = part["data"]
+                    # Agent mode can sit through several searches before a token
+                    # appears; show the work rather than an idle spinner. Chat
+                    # mode's single search is implicit, so its stream is unchanged.
+                    searches = (result.get("searches") or []) if body.mode == "agent" else []
+                    for query in searches[reported_searches:]:
+                        yield _sse(
+                            {
+                                "type": "search",
+                                "query": query,
+                                "sources": len(result.get("retrieved") or []),
+                            }
+                        )
+                    reported_searches = len(searches)
                     continue
 
                 chunk, metadata = part["data"]

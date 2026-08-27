@@ -46,6 +46,14 @@ default `127.0.0.1` bind is reached with no root and no edit:
 docker compose -f docker-compose.yml -f docker-compose.host-net.yml up --build
 ```
 
+Put this in your `.env` and plain `docker compose up` does it for you — worth
+doing, because a plain `up` otherwise recreates the container on bridge
+networking and every answer starts failing again:
+
+```bash
+COMPOSE_FILE=docker-compose.yml:docker-compose.host-net.yml
+```
+
 (Linux only: on Docker Desktop the "host" is a VM, so it buys nothing. The
 container also stops being isolated from your network.)
 
@@ -89,6 +97,22 @@ says so rather than letting it pass as grounded.
 Every answer has a **Copy** button, and every code block a **Copy** and a
 **Download**. Copying gives you the Markdown behind the answer rather than the
 formatted text, so it pastes into a document or an editor unchanged.
+
+### Chat or Agent
+
+Above the message box are two modes. They change how hard cairn looks for
+evidence — never how freely it answers.
+
+| | What it does | Good for |
+|---|---|---|
+| **Chat** | Searches your documents once, then answers. | Most questions. Fast, one model call. |
+| **Agent** | Searches, reads what came back, rewrites the query and searches again, then answers from everything it gathered. | Vague or many-sided questions where the right words are not in the question. |
+
+Agent mode shows each search as it runs, so you can see what it looked for. It
+costs an extra model call per search — `AGENT_MAX_SEARCHES` is the ceiling.
+
+Both modes obey the same rule: an answer with nothing to cite is not given. Agent
+mode looks harder, it does not guess more.
 
 The stylesheet is compiled in the browser from a CDN, so the page needs internet
 on first load even though everything else runs locally. Swapping that for a
@@ -166,6 +190,7 @@ Everything is set through environment variables, documented with defaults in
 | `LLM_MODEL` | `llama3.1` | Any model you have pulled (`ollama ls`) |
 | `ENV` | `dev` | `dev` forgets on restart; `local` and `prod` do not |
 | `MEMORY_EXTRACTION` | `rules` | `off` to stop remembering durable facts |
+| `AGENT_MAX_SEARCHES` | `3` | Searches per turn in Agent mode; `1` makes it act like Chat |
 | `LOG_LEVEL` | `INFO` | Per-request timings and retrieval scores |
 
 ## For developers
