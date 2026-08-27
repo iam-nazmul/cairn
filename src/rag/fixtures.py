@@ -1,16 +1,4 @@
-"""Seed corpus for the stubbed vector store.
-
->>> SEAM <<<
-The corpus ingestion / ETL pipeline is explicitly OUT OF SCOPE (SPEC §3, §11:
-"confirm the vector store and metadata schema are owned elsewhere"). These
-fixture documents exist only so the graph, the API and the tests can run
-end-to-end against a real `VectorStore` implementation.
-
-Replacing this with a real index means implementing the `VectorStore` protocol
-in src/rag/retrieve.py -- nothing else in the codebase should need to change.
-The metadata contract that a real store MUST honour is `source` (citable) and
-`score` (comparable, higher is better).
-"""
+"""Seed corpus for the stubbed vector store. Ingestion is out of scope (SPEC §3)."""
 
 from __future__ import annotations
 

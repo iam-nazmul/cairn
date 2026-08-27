@@ -1,13 +1,4 @@
-"""Per-node instrumentation (SPEC §10 observability).
-
-Wraps each node so every super-step logs its duration, plus the signals worth
-having when a turn goes wrong: which chunks were retrieved and at what scores,
-how many long-term facts were loaded, and the approximate token cost of the
-answer. Node code stays clean -- instrumentation is applied at wiring time.
-
-`thread_id` is included on every line so a single conversation can be followed
-through the logs.
-"""
+"""Per-node instrumentation (SPEC §10 observability)."""
 
 from __future__ import annotations
 
@@ -29,17 +20,7 @@ logger = logging.getLogger("cairn.graph")
 
 
 def configure_logging(settings: Settings) -> None:
-    """Make the instrumentation actually emit at runtime.
-
-    Without this the node logs are silent outside the test suite: nothing sets a
-    level on the `cairn` logger, and a propagated INFO record with no root handler
-    falls through to logging's lastResort handler, which only prints WARNING+.
-
-    Root is left at WARNING so third-party libraries stay quiet; ancestor logger
-    levels are not consulted for propagated records, so `cairn` at INFO still
-    reaches the root handler. Propagation is deliberately left on -- pytest's
-    caplog captures through it.
-    """
+    """Enable the `cairn` logger; without this the node logs never emit."""
     logging.basicConfig(
         level=logging.WARNING,
         format="%(asctime)s %(levelname)s %(name)s %(message)s",

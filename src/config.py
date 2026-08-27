@@ -29,21 +29,16 @@ class Settings(BaseSettings):
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
-    # `ENV` selects the checkpointer/store backend. Nothing outside src/memory/
-    # is allowed to branch on this value -- graph code is identical everywhere.
+    # Selects the backend. Nothing outside src/memory/ may branch on it.
     env: Env = "dev"
 
-    # LLM seam. "fake" is a deterministic scripted model used by the test suite
-    # and offline runs; "ollama" talks to a local Ollama server; anything else
-    # goes through LangChain's init_chat_model. See src/rag/llm.py.
+    # "fake" = scripted model for tests; "ollama" = local server; else init_chat_model.
     llm_provider: str = "fake"
     llm_model: str = ""
     llm_temperature: float = 0.0
 
-    # Ollama. num_ctx must comfortably hold the system prompt (retrieved context
-    # + long-term facts) plus the checkpointed history; Ollama's own default of
-    # 4096 silently truncates the oldest tokens, which looks exactly like the
-    # chatbot "forgetting" earlier turns.
+    # num_ctx must exceed prompt + history; Ollama's 4096 default silently drops
+    # the oldest tokens, which looks exactly like forgetting.
     ollama_base_url: str = "http://localhost:11434"
     ollama_num_ctx: int = 8192
 
@@ -51,22 +46,18 @@ class Settings(BaseSettings):
     sqlite_path: str = "cairn-checkpoints.db"
     database_url: str = ""
 
-    # Long-term memory (SPEC §11, resolved in M3). "rules" is deterministic and
-    # runs in the gates without a model; "llm" trades precision and stable upsert
-    # keys for recall, at one extra model call on every turn's write path.
+    # SPEC §11: "rules" is deterministic; "llm" trades precision for recall.
     memory_extraction: Literal["rules", "llm", "off"] = "rules"
     max_long_term_facts: int = 50
 
-    # Observability (SPEC §10). Applies to the "cairn" logger only, so raising it
-    # does not drag in third-party debug noise.
+    # Applies to the "cairn" logger only, so it pulls in no third-party noise.
     log_level: str = "INFO"
 
     # Retrieval + context budget (SPEC §10 cost control).
     retrieval_top_k: int = 4
     retrieval_min_score: float = 0.05
     max_context_chars: int = 4000
-    # History budget (SPEC §10, and the §11 long-thread risk). Older turns are
-    # trimmed before the LLM call; the checkpoint keeps them all.
+    # Trimmed before the LLM call only; the checkpoint keeps every turn.
     max_history_tokens: int = 1500
 
 

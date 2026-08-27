@@ -1,16 +1,4 @@
-"""Chat-model seam.
-
->>> SEAM <<<
-SPEC §8 wants a pluggable LangChain chat model. Real providers need an API key,
-but the memory tests assert on answer CONTENT ("What's my name?" -> "Alice") and
-the citation eval asserts on markers, so the gates cannot depend on a network
-call. `DeterministicChatModel` is a scripted stand-in whose only job is to make
-the plumbing observable: it reads the history, facts and context it was handed
-and reflects them back. It is not a model and makes no attempt to be one.
-
-`LLM_PROVIDER=fake` (the default) selects it; any other value goes through
-LangChain's `init_chat_model` to a real provider.
-"""
+"""Chat-model seam: `fake` is a scripted stand-in, anything else a real provider."""
 
 from __future__ import annotations
 
@@ -27,14 +15,13 @@ _BLOCK_RE = re.compile(r"\[S(\d+)\] source=(\S+) score=([0-9.]+)\n(.+?)(?=\n\n\[
 _FACTS_RE = re.compile(r"^- (.+)$", re.M)
 # "My name is Alice", "my preferred language is Bengali"
 _RECALL_RE = re.compile(r"\bmy ([a-z][a-z ]{0,24}?) is ([^.,!?\n]+)", re.I)
-# "We were discussing invoice 42" -- conversational, thread-scoped, and
-# deliberately NOT a durable fact (see .claude/references/memory-placement.md).
+# Thread-scoped by design: deliberately not a durable fact.
 _TOPIC_RE = re.compile(r"\bwe (?:were|are) discussing\s+([^.,!?\n]+)", re.I)
 _SENTENCE_RE = re.compile(r"(?<=[.!?])\s+")
 
 
 class ChatModel(Protocol):
-    """The narrow slice of the LangChain chat-model interface the graph uses."""
+    """The slice of LangChain's chat-model interface the graph uses."""
 
     async def ainvoke(self, input: Sequence[AnyMessage], /) -> AIMessage: ...
 
@@ -52,9 +39,10 @@ def _best_sentence(text: str, question_tokens: set[str]) -> str:
 
 
 class DeterministicChatModel:
-    """Scripted stand-in for a real chat model. See the module docstring."""
+    """Scripted stand-in for a chat model. See `ChatModel.ainvoke`."""
 
     async def ainvoke(self, input: Sequence[AnyMessage], /) -> AIMessage:
+        """See `ChatModel.ainvoke`. Reflects back the context it was handed."""
         messages = list(input)
         system = _text(messages[0]) if messages else ""
         turns = messages[1:]
@@ -68,8 +56,7 @@ class DeterministicChatModel:
 
         parts: list[str] = []
 
-        # 1. Remembered context: conversation history first, then long-term facts.
-        #    This is memory, not model priors -- allowed even on the clarify path.
+        # Memory, not model priors -- allowed even on the clarify path.
         recalled = self._recall(prior, question)
         topic = self._recall_topic(prior, question)
         if recalled is not None:
@@ -82,7 +69,6 @@ class DeterministicChatModel:
             if fact is not None:
                 parts.append(f"From what I know about you: {fact}")
 
-        # 2. Grounded answer from retrieved context, with a citation marker.
         if blocks:
             index, _source, _score, text = blocks[0]
             parts.append(f"{_best_sentence(text, question_tokens)} [S{index}]")
@@ -131,12 +117,7 @@ class DeterministicChatModel:
 
 
 def get_chat_model(settings: Settings) -> ChatModel:
-    """Resolve the configured provider.
-
-    Real chat models are narrowed with `cast`: their `ainvoke` is a structural
-    superset of `ChatModel` (extra optional kwargs), which Protocol matching
-    does not accept.
-    """
+    """Resolve the configured provider."""
     if settings.llm_provider == "fake":
         return DeterministicChatModel()
 

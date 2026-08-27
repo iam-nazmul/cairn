@@ -1,8 +1,4 @@
-"""Vector store interface and the stubbed, seeded implementation (SPEC §6.2).
-
-The `VectorStore` protocol is the seam described in src/rag/fixtures.py: swap in
-a pgvector- or managed-DB-backed implementation without touching the graph.
-"""
+"""Vector store interface and the seeded stub implementation."""
 
 from __future__ import annotations
 
@@ -17,8 +13,7 @@ from src.rag.fixtures import SEED_DOCS, SeedDoc
 
 _WORD_RE = re.compile(r"[a-z0-9]+")
 
-# Words carrying no retrieval signal. Kept tiny and explicit: the lexical scorer
-# below is a stand-in for embeddings, not a search engine.
+# The lexical scorer is a stand-in for embeddings, not a search engine.
 _STOPWORDS = frozenset(
     {
         "a",
@@ -68,28 +63,20 @@ def tokenize(text: str) -> set[str]:
 
 @runtime_checkable
 class VectorStore(Protocol):
-    """Similarity search over the corpus.
-
-    Implementations MUST return `source` and `score` alongside `text`: the
-    citation requirement in CLAUDE.md depends on it.
-    """
+    """Similarity search. Implementations MUST return `source` and `score`."""
 
     async def search(self, query: str, *, top_k: int) -> list[RetrievedChunk]: ...
 
 
 class InMemoryVectorStore:
-    """Deterministic, dependency-free `VectorStore` used for local runs and tests.
-
-    Scores by token-overlap coefficient rather than embedding cosine similarity so
-    that results are stable and require no API key. Scores are in [0.0, 1.0] and
-    comparable to each other, which is all the graph's routing threshold needs.
-    """
+    """Deterministic, dependency-free `VectorStore` for local runs and tests."""
 
     def __init__(self, docs: tuple[SeedDoc, ...] = SEED_DOCS) -> None:
         self._docs = docs
         self._index: list[tuple[SeedDoc, set[str]]] = [(d, tokenize(d.text)) for d in docs]
 
     async def search(self, query: str, *, top_k: int) -> list[RetrievedChunk]:
+        """See `VectorStore.search`. Scores by token overlap, not embeddings."""
         query_tokens = tokenize(query)
         if not query_tokens:
             return []
@@ -102,7 +89,6 @@ class InMemoryVectorStore:
             score = round(overlap / len(query_tokens), 4)
             scored.append(RetrievedChunk(text=doc.text, source=doc.source, score=score))
 
-        # Sort by score desc, then source for a stable tie-break.
         scored.sort(key=lambda c: (-c["score"], c["source"]))
         return scored[:top_k]
 
@@ -110,13 +96,7 @@ class InMemoryVectorStore:
 def augment_query_with_history(
     question: str, messages: Sequence[AnyMessage], max_turns: int = 2
 ) -> str:
-    """Fold recent user turns into the search query (SPEC §6.2, "history-rewritten").
-
-    A follow-up like "and when do I get the money back?" shares no vocabulary
-    with the corpus; the terms that make it findable were established earlier in
-    the thread. Only prior HUMAN turns are folded in -- reusing the assistant's
-    own words would anchor retrieval to whatever it said last.
-    """
+    """Fold recent user turns into the search query (SPEC §6.2)."""
     prior = [str(m.content) for m in messages if m.type == "human"]
     if prior and prior[-1].strip() == question.strip():
         prior = prior[:-1]  # drop the current turn

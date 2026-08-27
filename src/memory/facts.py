@@ -1,13 +1,4 @@
-"""Durable-fact extraction for `write_memory` (SPEC §11, resolved in M3).
-
-Deterministic rules by default. The Store's failure mode is noise: a bad fact is
-not wrong once, it is injected into every future prompt on every future thread
-for that user. So this errs towards precision.
-
-Keys are derived from the normalized attribute, which makes writes idempotent
-upserts (SPEC §7.2): restating "my preferred language is Bengali" updates the
-existing row rather than adding a second one.
-"""
+"""Durable-fact extraction for `write_memory` (SPEC §11)."""
 
 from __future__ import annotations
 
@@ -73,11 +64,7 @@ def _from_attribute(text: str) -> list[Fact]:
 
 
 def extract_facts(text: str) -> list[Fact]:
-    """Pull durable facts out of a single user turn.
-
-    Only the user's own turn is ever scanned -- never the assistant's, and never
-    the retrieved documents.
-    """
+    """Pull durable facts out of a single user turn."""
     if not text or not text.strip():
         return []
 
@@ -91,7 +78,7 @@ def extract_facts(text: str) -> list[Fact]:
                 seen.add(identity)
                 facts.append(fact)
 
-    # 1. Explicit instruction wins: "remember that my name is Alice".
+    # Explicit instruction wins.
     remembered = _REMEMBER_RE.search(text)
     if remembered:
         payload = _clean(remembered.group(1))
@@ -102,11 +89,9 @@ def extract_facts(text: str) -> list[Fact]:
             add([Fact(key=f"note-{slugify(payload)}", text=payload, namespace=FACTS_NS)])
         return facts
 
-    # 2. First-person self-description.
     add(_from_attribute(text))
 
-    # 3. "I prefer X" -- keyed on the value, so distinct preferences coexist and
-    #    an identical restatement still upserts onto the same row.
+    # Keyed on the value, so distinct preferences coexist and restatements upsert.
     for match in _PREFER_RE.finditer(text):
         value = _clean(match.group(1))
         if value:

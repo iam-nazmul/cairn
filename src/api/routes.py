@@ -1,10 +1,4 @@
-"""HTTP layer (SPEC §9).
-
-The graph is built once in the lifespan handler and kept on `app.state`. That is
-deliberate: the durable savers are context managers whose connection closes when
-the scope exits, so constructing a graph per request would hand every request a
-closed connection.
-"""
+"""HTTP layer (SPEC §9)."""
 
 from __future__ import annotations
 
@@ -93,7 +87,7 @@ async def health(request: Request) -> HealthResponse:
 
 @app.post("/threads")
 async def create_thread() -> NewThreadResponse:
-    """Mint a thread id. No state is written until the first turn is checkpointed."""
+    """Mint a thread id. Nothing is written until the first turn is checkpointed."""
     return NewThreadResponse(thread_id=f"t_{uuid.uuid4().hex[:16]}")
 
 
@@ -101,11 +95,10 @@ async def create_thread() -> NewThreadResponse:
 async def chat(request: Request, body: ChatRequest) -> ChatResponse:
     graph = request.app.state.graph
 
-    # thread_id in config (the checkpointer reads it there); user_id in context.
+    # thread_id in config (where the checkpointer reads it); user_id in context.
     config = {"configurable": {"thread_id": body.thread_id}}
 
-    # The client sends ONLY the new message -- prior turns are restored from
-    # the checkpoint. Never resend history from the client.
+    # ONLY the new message: prior turns are restored from the checkpoint.
     result: dict[str, Any] = await graph.ainvoke(
         {"messages": [{"role": "user", "content": body.message}], "question": body.message},
         config,
@@ -122,19 +115,14 @@ async def chat(request: Request, body: ChatRequest) -> ChatResponse:
 
 @app.delete("/users/{user_id}")
 async def forget(request: Request, user_id: str) -> DeletionResponse:
-    """Right to be forgotten (SPEC §10).
-
-    Spans BOTH memory systems: every checkpoint for every thread the user owns,
-    and every Store namespace scoped to that user. Other users are untouched.
-    Idempotent -- deleting an unknown user reports zeroes rather than failing.
-    """
+    """Right to be forgotten (SPEC §10): every thread and every stored fact."""
     report = await forget_user(request.app.state.store, request.app.state.checkpointer, user_id)
     return DeletionResponse(**report.as_dict())
 
 
 @app.get("/threads/{thread_id}/history")
 async def thread_history(request: Request, thread_id: str) -> HistoryResponse:
-    """Read history straight from the checkpoint -- never a hand-rolled table."""
+    """Read history straight from the checkpoint, never a hand-rolled table."""
     graph = request.app.state.graph
     snapshot = await graph.aget_state({"configurable": {"thread_id": thread_id}})
 

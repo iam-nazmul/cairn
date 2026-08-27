@@ -1,10 +1,4 @@
-"""StateGraph wiring and compilation (SPEC §6.3, §6.4).
-
-START -> load_memory -> retrieve -> generate ------> write_memory -> END
-                             |           |                ^
-                             |           v (uncited)      |
-                             +-------> clarify -----------+
-"""
+"""StateGraph wiring. Flow diagram in CLAUDE.md."""
 
 from __future__ import annotations
 
@@ -44,10 +38,8 @@ def build_graph(
     vector_store = vector_store or get_vector_store()
     chat_model = chat_model or get_chat_model(settings)
 
-    # context_schema declares Context so nodes can read runtime.context.user_id.
     builder = StateGraph(ChatState, context_schema=Context)
 
-    # Instrumentation is applied here, at wiring time, so node code stays clean.
     builder.add_node("load_memory", instrument("load_memory", make_load_memory(settings)))
     builder.add_node("retrieve", instrument("retrieve", make_retrieve(vector_store, settings)))
     builder.add_node("generate", instrument("generate", make_generate(chat_model, settings)))
