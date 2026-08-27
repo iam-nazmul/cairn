@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import re
 from collections.abc import Sequence
+from pathlib import Path
 from typing import Protocol, cast
+from urllib.parse import urlparse
 
+import httpx
 from langchain.messages import AIMessage, AnyMessage
 
 from src.config import Settings
@@ -114,6 +117,83 @@ class DeterministicChatModel:
             if overlap and (best is None or overlap > best[0]):
                 best = (overlap, fact)
         return None if best is None else best[1]
+
+
+def _is_connection_failure(exc: BaseException) -> bool:
+    """Walk the cause chain for a refused/failed connection.
+
+    Every provider tunnels these through httpx, but each wraps them differently,
+    so match the chain rather than one library's exception type.
+    """
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, ConnectionError | httpx.TransportError):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
+def in_container() -> bool:
+    """Docker creates this marker file; Compose runs are the case that matters."""
+    return Path("/.dockerenv").exists()
+
+
+def unreachable_hint(settings: Settings) -> str:
+    """What to actually do about an unreachable provider.
+
+    The right advice is the opposite depending on where this process runs, so one
+    message for both is worse than useless -- it sends the reader off to fix
+    something that was never broken.
+    """
+    if settings.llm_provider != "ollama":
+        return f"Cannot reach the {settings.llm_provider!r} provider."
+
+    url = settings.ollama_base_url
+    preamble = f"Cannot reach Ollama at {url}."
+    loopback = (urlparse(url).hostname or "") in ("localhost", "127.0.0.1", "::1")
+
+    if not in_container():
+        return (
+            f"{preamble} Is it running? `ollama ls` should answer, and "
+            "OLLAMA_BASE_URL must point at it."
+        )
+    if loopback:
+        # Overwhelmingly this is OLLAMA_BASE_URL leaking out of .env into
+        # Compose's ${...} substitution.
+        return (
+            f"{preamble} Inside a container that address is the container itself, "
+            "not your machine. Compose substitutes OLLAMA_BASE_URL from the "
+            "project's .env file, so a value meant for a host run overrides the "
+            "compose default: unset it in .env (see .env.example), or set it to "
+            "http://host.docker.internal:11434. `docker compose config` shows "
+            "what actually reached the container."
+        )
+    return (
+        f"{preamble} Ollama binds to 127.0.0.1 by default, which a container "
+        "cannot reach: set OLLAMA_HOST=0.0.0.0:11434 on the host (see "
+        "docker-compose.yml), run `docker compose --profile ollama up`, or start "
+        "with LLM_PROVIDER=fake."
+    )
+
+
+def explain(exc: BaseException, settings: Settings) -> str:
+    """A turn's failure, phrased for whoever has to fix it."""
+    return unreachable_hint(settings) if _is_connection_failure(exc) else str(exc)
+
+
+async def probe(settings: Settings) -> bool | None:
+    """Is the provider answering? `None` when there is nothing to probe."""
+    if settings.llm_provider != "ollama":
+        # `fake` is always up; hosted providers have no free liveness endpoint.
+        return None
+    try:
+        async with httpx.AsyncClient(timeout=2.0) as client:
+            response = await client.get(f"{settings.ollama_base_url.rstrip('/')}/api/tags")
+        return response.status_code == 200
+    except Exception:
+        return False
 
 
 def get_chat_model(settings: Settings) -> ChatModel:

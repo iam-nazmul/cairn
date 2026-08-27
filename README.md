@@ -17,8 +17,9 @@ provider if you prefer.
 
 ```bash
 docker compose up --build
-curl localhost:8000/health
 ```
+
+Then open **<http://localhost:8000>** and ask it something.
 
 That starts the API on port 8000 and its database. The language model comes from
 [Ollama](https://ollama.com) running on your machine:
@@ -27,8 +28,9 @@ That starts the API on port 8000 and its database. The language model comes from
 ollama pull llama3.1
 ```
 
-Ollama listens only on `127.0.0.1` by default, which the container cannot reach.
-Allow it once:
+Ollama listens only on `127.0.0.1` by default, which the container cannot reach —
+if you skip this, every answer fails and the status dot in the sidebar turns
+amber. Allow it once:
 
 ```bash
 sudo systemctl edit ollama     # [Service]
@@ -36,10 +38,26 @@ sudo systemctl edit ollama     # [Service]
 sudo systemctl restart ollama
 ```
 
-Prefer not to change that? `docker compose --profile ollama up --build` runs the
-model inside Docker instead (it re-downloads the models), or
-`LLM_PROVIDER=fake docker compose up --build` starts everything with a canned
-stand-in model, which is enough to try the endpoints.
+Prefer not to touch your Ollama setup? On **Linux**, run the API in the host's
+network namespace instead — then its `localhost` is your `localhost`, and the
+default `127.0.0.1` bind is reached with no root and no edit:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.host-net.yml up --build
+```
+
+(Linux only: on Docker Desktop the "host" is a VM, so it buys nothing. The
+container also stops being isolated from your network.)
+
+Failing that, `docker compose --profile ollama up --build` runs the model inside
+Docker instead (it re-downloads the models), or `LLM_PROVIDER=fake docker compose
+up --build` starts everything with a canned stand-in model, which is enough to
+try the endpoints.
+
+`OLLAMA_BASE_URL` in `.env` applies only when you run the app directly on your
+machine. Docker needs a different address — `localhost` inside a container means
+the container — so Compose passes its own and takes overrides from
+`DOCKER_OLLAMA_BASE_URL`. `docker compose config` shows what the container gets.
 
 Running without Docker:
 
@@ -49,7 +67,33 @@ cp .env.example .env
 uv run uvicorn src.api.routes:app --reload
 ```
 
-## Talking to it
+## In the browser
+
+<http://localhost:8000> is a chat window over the same API. Answers stream in as
+the model writes them — formatted, so lists, bold and code blocks read as such
+rather than as raw asterisks — with the sources each one used listed underneath.
+
+- **Conversations** in the sidebar. Pick one up where you left it — the history
+  is restored from the checkpoint, not from anything the browser kept.
+- **What cairn remembers** lists the durable facts on file for you. Say *"my
+  preferred language is Bengali"* and watch it appear, then start a brand-new
+  conversation and see it still there.
+- **Signed in as** is the `user_id`. Change it and you get a different person's
+  conversations and a different set of remembered facts.
+- **Forget me** erases both, and tells you how much it deleted.
+
+An answer with no sources under it was not drawn from your documents — the UI
+says so rather than letting it pass as grounded.
+
+Every answer has a **Copy** button, and every code block a **Copy** and a
+**Download**. Copying gives you the Markdown behind the answer rather than the
+formatted text, so it pastes into a document or an editor unchanged.
+
+The stylesheet is compiled in the browser from a CDN, so the page needs internet
+on first load even though everything else runs locally. Swapping that for a
+prebuilt file is two commands: see [src/api/README.md](src/api/README.md).
+
+## Talking to it directly
 
 Start a conversation, then send messages to it. You only ever send the newest
 message — earlier turns are remembered for you.
@@ -80,7 +124,10 @@ not drawn from your documents.
 |---|---|
 | `POST /threads` | Start a conversation and get its id |
 | `POST /chat` | Send one message and get an answer with citations |
+| `POST /chat/stream` | The same, streamed back as the answer is written |
 | `GET /threads/{id}/history` | Everything said in a conversation |
+| `GET /users/{user_id}/threads` | A user's conversations |
+| `GET /users/{user_id}/facts` | What is remembered about a user |
 | `DELETE /users/{user_id}` | Erase a user: every conversation and every remembered fact |
 | `GET /health` | Check it is running |
 

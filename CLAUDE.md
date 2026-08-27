@@ -90,6 +90,12 @@ POSTGRES_TEST_URI=postgresql://cairn:cairn@localhost:5433/cairn?sslmode=disable 
 - `retrieve` must return `{text, source, score}` per chunk.
 - An answer that cites nothing must never ship as grounded. Empty or weak
   retrieval routes to `clarify`, never to model priors.
+- Streaming does not exempt anything from that: `generate` streams before the
+  citation gate runs, so a `generate → clarify` switch must emit `restart` and
+  the client must discard the draft. Filter streamed tokens to the `generate` and
+  `clarify` nodes — `write_memory` calls a model too.
+- Keep `POST /chat/stream` and `POST /chat` interchangeable. A test asserts they
+  return the same answer and citations; do not let one grow behaviour.
 
 **Dependencies**
 - Do not bump `langgraph` or any `langgraph-checkpoint-*` package without
@@ -110,7 +116,7 @@ POSTGRES_TEST_URI=postgresql://cairn:cairn@localhost:5433/cairn?sslmode=disable 
 | `src/graph/` | State, nodes, wiring | [src/graph/README.md](src/graph/README.md) |
 | `src/memory/` | Checkpointer, Store, facts, deletion | [src/memory/README.md](src/memory/README.md) |
 | `src/rag/` | Retrieval, prompts, LLM seam | [src/rag/README.md](src/rag/README.md) |
-| `src/api/` | HTTP layer | [src/api/README.md](src/api/README.md) |
+| `src/api/` | HTTP layer, streaming, browser UI | [src/api/README.md](src/api/README.md) |
 | `.claude/references/` | Verified LangGraph API, memory placement | — |
 
 ## Gotchas
@@ -118,7 +124,13 @@ POSTGRES_TEST_URI=postgresql://cairn:cairn@localhost:5433/cairn?sslmode=disable 
 - `ruff format .` formats Python inside Markdown. `*.md` is excluded in
   `pyproject.toml`; do not remove that exclusion.
 - LangGraph declares `runtime` **keyword-only**: `async def node(state, *, runtime)`.
-- Ollama binds to `127.0.0.1`, so containers cannot reach it. See
-  [docker-compose.yml](docker-compose.yml).
+- Ollama binds to `127.0.0.1`, so containers cannot reach it. Either rebind it
+  (`OLLAMA_HOST=0.0.0.0:11434`, needs root) or overlay
+  [docker-compose.host-net.yml](docker-compose.host-net.yml) on Linux.
+- `OLLAMA_BASE_URL` in `.env` is for host runs only. Compose reads `.env` for
+  `${VAR}`, so it takes its override from `DOCKER_OLLAMA_BASE_URL` instead —
+  otherwise the host value aims the container at itself.
 - `caplog.set_level` makes logging tests pass even when nothing configures
   logging. Assert against the real path (`configure_logging`).
+- `/health` must stay 200 when `llm_reachable` is false. Compose health-checks it;
+  failing it when the model is down restart-loops a healthy API.

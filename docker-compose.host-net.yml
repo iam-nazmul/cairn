@@ -1,0 +1,22 @@
+# Linux-only overlay: run the API in the HOST network namespace.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.host-net.yml up --build
+#
+# Use this when Ollama runs on the host with its default 127.0.0.1 bind and you
+# would rather not change that. Sharing the host's network namespace makes the
+# container's `localhost` the host's, so it reaches Ollama with no OLLAMA_HOST
+# edit and no root.
+#
+# The trade: `network_mode: host` is Linux-only (on Docker Desktop the "host" is
+# a VM, so this buys nothing), the container is no longer isolated from the host
+# network, and `ports:` no longer applies -- uvicorn binds the host's :8000
+# directly. Postgres stays on the compose bridge, so it is reached through its
+# published 5433 rather than by service name.
+services:
+  api:
+    network_mode: host
+    # Overrides the bridge-network values in docker-compose.yml: on the host
+    # namespace both services are plain localhost ports.
+    environment:
+      OLLAMA_BASE_URL: ${DOCKER_OLLAMA_BASE_URL:-http://localhost:11434}
+      DATABASE_URL: postgresql://cairn:cairn@localhost:5433/cairn?sslmode=disable

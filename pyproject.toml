@@ -23,13 +23,15 @@ dependencies = [
     "pydantic-settings==2.15.0",
     "psycopg[binary,pool]==3.3.4",
     "langchain-ollama==1.1.0",
+    # Already pulled in by the ollama client; declared because src/rag/llm.py
+    # imports it directly to probe whether the provider is reachable.
+    "httpx==0.28.1",
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest==9.1.1",
     "pytest-asyncio==1.4.0",
-    "httpx==0.28.1",
     "ruff==0.16.4",
     "mypy==2.3.1",
 ]

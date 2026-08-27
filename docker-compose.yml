@@ -44,8 +44,18 @@ services:
       LLM_PROVIDER: ${LLM_PROVIDER:-ollama}
       LLM_MODEL: ${LLM_MODEL:-llama3.1}
       # host.docker.internal resolves to the host via the extra_hosts entry below.
-      # Point this at http://ollama:11434 when using the `ollama` profile.
-      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      #
+      # Deliberately NOT ${OLLAMA_BASE_URL}: Compose substitutes from the project's
+      # .env, where that key is set for HOST runs (http://localhost:11434). Inside
+      # a container that address is the container itself, so it would silently
+      # beat this default and break every turn. The override knob is spelled
+      # differently so the two cannot collide:
+      #
+      #   DOCKER_OLLAMA_BASE_URL=http://ollama:11434 \
+      #     docker compose --profile ollama up
+      #
+      # `docker compose config` shows what the container will actually get.
+      OLLAMA_BASE_URL: ${DOCKER_OLLAMA_BASE_URL:-http://host.docker.internal:11434}
       OLLAMA_NUM_CTX: ${OLLAMA_NUM_CTX:-8192}
       MEMORY_EXTRACTION: ${MEMORY_EXTRACTION:-rules}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
