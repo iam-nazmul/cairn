@@ -73,6 +73,35 @@ curl -s localhost:8000/chat -H 'content-type: application/json' \
   -d '{"user_id":"u_1","thread_id":"t_1","message":"How long do I have to submit an expense report?"}'
 ```
 
+## Run everything in Docker
+
+```bash
+docker compose up --build      # API on :8000, Postgres on :5433
+curl localhost:8000/health
+docker compose down            # add -v to drop the database
+```
+
+The API container talks to **Ollama on your host**, so models you have already
+pulled are reused. Ollama listens on `127.0.0.1` by default, which a container
+cannot reach — allow it once:
+
+```bash
+sudo systemctl edit ollama     # [Service]
+                               # Environment="OLLAMA_HOST=0.0.0.0:11434"
+sudo systemctl restart ollama
+```
+
+Alternatives, if you would rather not change the host:
+
+```bash
+# Ollama in Compose (self-contained; re-downloads models into a volume)
+OLLAMA_BASE_URL=http://ollama:11434 docker compose --profile ollama up --build
+docker compose exec ollama ollama pull llama3.1
+
+# or no LLM at all, to smoke-test the plumbing
+LLM_PROVIDER=fake docker compose up --build
+```
+
 ## Quality gates
 
 ```bash

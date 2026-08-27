@@ -1,6 +1,71 @@
-# Postgres for ENV=prod: one database backs BOTH the checkpointer and the Store
-# (SPEC §11, resolved in M3). pgvector is present for the Store's semantic index.
+# Runs the whole project: API + Postgres.
+#
+#   docker compose up --build          # API on :8000, Postgres on :5433
+#   docker compose down                # stop (keeps data)
+#   docker compose down -v             # stop and drop the database
+#
+# The LLM comes from Ollama running on the HOST by default, so the models you
+# have already pulled (`ollama ls`) are used as-is rather than re-downloaded.
+#
+# !! ONE-TIME HOST SETUP !!
+# Ollama listens on 127.0.0.1 by default. host.docker.internal resolves to the
+# docker gateway, which is a DIFFERENT interface, so the container gets
+# "connection refused" and every turn fails with httpx.ConnectError. Let Ollama
+# listen on all interfaces once:
+#
+#   sudo systemctl edit ollama      # add:  [Service]
+#                                   #       Environment="OLLAMA_HOST=0.0.0.0:11434"
+#   sudo systemctl restart ollama
+#
+# Verify:  curl http://$(hostname -I | awk '{print $1}'):11434/api/tags
+#
+# Prefer not to touch the host? Run Ollama in Compose instead -- self-contained,
+# but it re-downloads the models into a volume:
+#
+#   OLLAMA_BASE_URL=http://ollama:11434 docker compose --profile ollama up --build
+#   docker compose exec ollama ollama pull llama3.1
+#
+# Or skip the LLM entirely for a smoke test of the plumbing:
+#
+#   LLM_PROVIDER=fake docker compose up --build
+
 services:
+  api:
+    build: .
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      # ENV=prod: ONE Postgres backs both the checkpointer and the Store (SPEC §11).
+      ENV: prod
+      # Container-to-container, so the service name and the INTERNAL port 5432 --
+      # not the 5433 published for the host.
+      DATABASE_URL: postgresql://cairn:cairn@postgres:5432/cairn?sslmode=disable
+      LLM_PROVIDER: ${LLM_PROVIDER:-ollama}
+      LLM_MODEL: ${LLM_MODEL:-llama3.1}
+      # host.docker.internal resolves to the host via the extra_hosts entry below.
+      # Point this at http://ollama:11434 when using the `ollama` profile.
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      OLLAMA_NUM_CTX: ${OLLAMA_NUM_CTX:-8192}
+      MEMORY_EXTRACTION: ${MEMORY_EXTRACTION:-rules}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    extra_hosts:
+      # Linux needs this mapping explicitly; it is a no-op on Docker Desktop.
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    restart: unless-stopped
+
+  # Postgres for ENV=prod: one database backs BOTH the checkpointer and the Store
+  # (SPEC §11, resolved in M3). pgvector is present for the Store's semantic index.
   postgres:
     image: pgvector/pgvector:pg16
     environment:
@@ -8,6 +73,8 @@ services:
       POSTGRES_PASSWORD: cairn
       POSTGRES_DB: cairn
     ports:
+      # 5433 on the host so it cannot collide with a local Postgres on 5432.
+      # This is also the port POSTGRES_TEST_URI uses for the Postgres test suite.
       - "5433:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U cairn -d cairn"]
@@ -16,6 +83,24 @@ services:
       retries: 30
     volumes:
       - cairn-pgdata:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  # Optional: only started with `--profile ollama`. Skip it if Ollama is already
+  # running on the host -- that avoids re-pulling multi-GB models.
+  ollama:
+    profiles: ["ollama"]
+    image: ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    volumes:
+      - cairn-ollama:/root/.ollama
+    healthcheck:
+      test: ["CMD-SHELL", "ollama list >/dev/null 2>&1 || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
 
 volumes:
   cairn-pgdata:
+  cairn-ollama:
