@@ -1,0 +1,70 @@
+[project]
+name = "cairn"
+version = "0.1.0"
+description = "Memory-enabled RAG chatbot orchestrated as a LangGraph state graph. See SPEC.md."
+readme = "README.md"
+requires-python = ">=3.11"
+
+# Versions are PINNED deliberately. SPEC.md §8 and CLAUDE.md both warn that the
+# checkpointer/store APIs change between LangGraph releases: do not bump langgraph
+# or any langgraph-checkpoint-* package without re-running tests/test_memory.py
+# against BOTH the SQLite and Postgres backends.
+dependencies = [
+    "langgraph==1.2.11",
+    "langgraph-checkpoint==4.2.0",
+    "langgraph-checkpoint-sqlite==3.1.1",
+    "langgraph-checkpoint-postgres==3.1.2",
+    "langchain==1.3.17",
+    "langchain-core==1.6.0",
+    "fastapi==0.141.1",
+    "uvicorn[standard]==0.52.4",
+    "pydantic==2.13.4",
+    "pydantic-settings==2.15.0",
+    "psycopg[binary,pool]==3.3.4",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest==9.1.1",
+    "pytest-asyncio==1.4.0",
+    "httpx==0.28.1",
+    "ruff==0.16.4",
+    "mypy==2.3.1",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+# Markdown is excluded deliberately: ruff formats Python code blocks inside .md,
+# which silently rewrites SPEC.md, CLAUDE.md and the .claude/ skill docs when the
+# prescribed `ruff format .` gate runs.
+extend-exclude = ["venv", ".venv", "*.md"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "ASYNC", "RUF"]
+
+[tool.mypy]
+python_version = "3.11"
+files = ["src"]
+strict = true
+warn_unreachable = true
+exclude = ["venv/", ".venv/"]
+
+[[tool.mypy.overrides]]
+module = ["langgraph.*", "langchain.*", "langchain_core.*"]
+follow_untyped_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+addopts = "-q"
+markers = [
+    "postgres: memory tests that require a live Postgres (set POSTGRES_TEST_URI)",
+]

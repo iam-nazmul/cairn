@@ -102,13 +102,22 @@ class ChatState(TypedDict):
 ```python
 graph = builder.compile(checkpointer=checkpointer, store=store)
 
-config = {"configurable": {"thread_id": thread_id, "user_id": user_id}}
+config = {"configurable": {"thread_id": thread_id}}
 
 # Client sends ONLY the new message; prior turns are restored from the checkpoint.
-result = graph.invoke({"messages": [{"role": "user", "content": text}],
-                       "question": text},
-                      config=config)
+result = await graph.ainvoke({"messages": [{"role": "user", "content": text}],
+                              "question": text},
+                             config=config,
+                             context=Context(user_id=user_id))
 ```
+
+> **Amended at implementation time (M1).** Current LangGraph injects a `Runtime`
+> into nodes rather than a raw `config`: `thread_id` still travels in
+> `config["configurable"]` (where the checkpointer reads it), but `user_id` now
+> travels in a separate `context=` argument, declared to the graph via
+> `StateGraph(ChatState, context_schema=Context)` and read inside a node as
+> `runtime.context.user_id`. Node signature is `async def node(state, *, runtime)`
+> — `runtime` is keyword-only. The core memory claim is unchanged.
 
 The `thread_id` is the key: same `thread_id` ⇒ same restored conversation state; different `thread_id` ⇒ isolated conversation.
 

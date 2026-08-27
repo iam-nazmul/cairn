@@ -5,7 +5,9 @@ Verified 2026-08-27 against the official docs (docs.langchain.com/oss/python/lan
 
 ---
 
-## ⚠️ Drift from CLAUDE.md / SPEC.md
+## ✅ Drift from CLAUDE.md / SPEC.md — RESOLVED in M1
+
+`CLAUDE.md` and `SPEC.md` §6.4 were updated to the current API. Kept below for the record.
 
 `CLAUDE.md` (Conventions) and `SPEC.md` §6.4 document this node signature:
 
@@ -16,7 +18,8 @@ def node(state, config) -> dict          # user_id via config["configurable"]["u
 Current LangGraph injects a **`Runtime`** instead:
 
 ```python
-async def node(state: ChatState, runtime: Runtime[Context]) -> dict:
+# `runtime` is KEYWORD-ONLY (langgraph/graph/_node.py::_NodeWithRuntime).
+async def node(state: ChatState, *, runtime: Runtime[Context]) -> dict:
     user_id = runtime.context.user_id
     store   = runtime.store
 ```
