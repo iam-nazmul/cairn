@@ -48,6 +48,9 @@ def make_state(**overrides: Any) -> ChatState:
         "answer": "",
         "searches": [],
         "new_hits": 0,
+        "tool_request": "",
+        "pending_action": None,
+        "tool_calls": [],
     }
     base.update(overrides)
     return ChatState(**base)  # type: ignore[typeddict-item]

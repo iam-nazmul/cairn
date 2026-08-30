@@ -6,7 +6,7 @@ For developers and agents changing the graph. Rules that apply everywhere are in
 | File | Contents |
 |---|---|
 | `state.py` | `ChatState`, `RetrievedChunk`, the `add_messages` reducer |
-| `nodes.py` | Node factories and the two routers |
+| `nodes.py` | Node factories and the routers |
 | `build.py` | `StateGraph` wiring, instrumentation, `compile()` |
 
 ## Adding a node
@@ -77,6 +77,84 @@ cites two numbers for one source.
 but the checkpoint holds last turn's values, so agent mode would otherwise merge
 into chunks found for a different question. It runs first on every turn, which is
 why the reset lives there rather than in the request the API builds.
+
+## Tools and approval
+
+Off unless `TOOLS_ENABLED=1`, and refused outright under `ENV=dev` — an
+in-memory checkpointer drops a pending approval on restart, which abandons the
+turn silently.
+
+```
+generate ── tool_request ──▶ plan ── effect=read  ──▶ act ──▶ generate
+                              │  └─ effect=write ──▶ approve ──▶ act
+                              └─ unknown/over budget ──▶ clarify
+```
+
+Four things here are load-bearing:
+
+**`generate` proposes nothing.** It emits a `TOOL name {json}` directive as its
+whole reply; `plan` is the only node that resolves one into a call. A directive
+is not an answer, so it never reaches `messages` and never ships as one.
+
+**`approve` does nothing before `interrupt()`.** A resume re-runs the node from
+its first line, so anything above that call happens twice. The effect lives in
+`act`, one edge later, which contains no `interrupt()` at all.
+
+**`act` refuses a `call_id` it already performed.** Belt and braces for the same
+replay hazard: a double-clicked approval must not send twice.
+
+**Tool output is evidence.** `act` merges the result into `retrieved` as a
+`tool://<name>/<call_id>` chunk with score `1.0`, so the ordinary citation gate
+applies to a tool-derived answer unchanged. A second grounding path would be free
+to drift from the first — the same argument as the single router above.
+
+`tool_request`, `pending_action` and `tool_calls` reset in `load_memory` with the
+rest of the per-turn state, which is what makes `TOOL_MAX_CALLS` a per-turn
+budget rather than a lifetime one for the thread.
+
+Known limitation: tools sit behind `generate`, so a turn whose retrieval was too
+weak goes to `clarify` and never gets the chance to ask for one. Actions that
+follow from retrieved content work; a bare "send this email" on an off-corpus
+thread does not.
+
+## Research mode: two subagents
+
+`src/graph/subagents.py` holds two compiled graphs with their own state, invoked
+from wrapper nodes because their schemas are not the parent's.
+
+```
+load_memory ── research ──▶ researcher ──▶ «supervise» ──▶ writer ──▶ «supervise» ──▶ write_memory
+                                 ▲                             │
+                                 └──── handed back, ≤ SUPERVISOR_MAX_HANDOFFS ───┘
+```
+
+The researcher runs §13.2's loop behind its own state and mints `Evidence` ids;
+the writer composes and cites. Four rules hold this together:
+
+**The writer is compiled without a vector store.** Not told not to search —
+unable to. An agent that can both search and compose is how a system starts
+citing sources that never reached the answer.
+
+**Ids travel with the evidence.** `format_evidence` renders the researcher's ids
+and `cited_evidence` matches markers against them, so a marker that names no id
+minted this turn cites nothing. Re-deriving citations from list position is
+exactly the bug the split would otherwise introduce.
+
+**Only the writer's final message appends to `messages`.** Everything else the
+two say stays inside their own state — `messages` is checkpointed per thread and
+would replay subagent chatter into every later turn.
+
+**The supervisor is a router.** It reads `evidence`, `last_agent` and `handoffs`
+and names the next node; deciding that with a model would cost a third call per
+turn for a verdict a condition already gives. It is bound to **both** subagents,
+for the same reason one router governs the research loop.
+
+Facts split by namespace: `(user_id, "facts")` widens the researcher's first
+query, `(user_id, "preferences")` reaches only the writer. A preference about
+tone is not a retrieval hint.
+
+Tools are unreachable here — `plan` hangs off `generate`, which a research turn
+never runs.
 
 ## State contract
 

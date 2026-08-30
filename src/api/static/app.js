@@ -31,6 +31,7 @@ const els = {
 const MODE_HINTS = {
   chat: "One search, then an answer.",
   agent: "Searches repeatedly, refining the query, before answering.",
+  research: "A researcher gathers the evidence; a writer composes the answer.",
 };
 
 const store = {
@@ -53,7 +54,8 @@ const store = {
 const state = {
   userId: store.get("cairn.user", `u_${Math.random().toString(36).slice(2, 10)}`),
   threadId: store.get("cairn.thread", null),
-  mode: store.get("cairn.mode", "chat") === "agent" ? "agent" : "chat",
+  // Anything unrecognised falls back to chat: the API rejects an unknown mode.
+  mode: MODE_HINTS[store.get("cairn.mode", "chat")] ? store.get("cairn.mode", "chat") : "chat",
   busy: false,
 };
 
@@ -141,7 +143,7 @@ function addAssistantMessage() {
   return { answer, sources };
 }
 
-/** Agent mode only: a line showing a search it ran. */
+/** Agent and research modes: a line showing a search that was run. */
 function addSearchNote(query, sources, before) {
   els.emptyState.remove();
   const node = clone("tpl-search");
@@ -287,6 +289,7 @@ async function send(message) {
   let bubble = null;
   let streamed = "";
   let frame = 0;
+  let pending = null;
 
   const open = () => {
     if (!bubble) {
@@ -350,6 +353,16 @@ async function send(message) {
         renderAnswer(open().answer, event.answer);
         renderSources(bubble.sources, event.citations);
         scrollToBottom();
+      } else if (event.type === "interrupt") {
+        // The turn is parked on an approval. What streamed was the request to
+        // act, not an answer, so it goes with the bubble it was drawn in.
+        stopWriting();
+        streamed = "";
+        if (bubble) {
+          bubble.answer.closest("article").remove();
+          bubble = null;
+        }
+        pending = event.pending;
       } else if (event.type === "error") {
         throw new Error(event.detail);
       }
@@ -368,6 +381,93 @@ async function send(message) {
     typing.remove();
     setBusy(false);
     els.input.focus();
+    refreshSidebar();
+  }
+
+  // After setBusy(false): the composer stays usable while a decision is open,
+  // and the approval is addressed by call_id rather than by being next in line.
+  if (pending) askForApproval(pending);
+}
+
+/** Draw the approval card. Nothing has happened yet when this is called. */
+function askForApproval(pending) {
+  els.emptyState.remove();
+  const card = clone("tpl-approval");
+  const node = card.firstElementChild;
+  node.querySelector("[data-tool]").textContent = pending.tool;
+
+  const editable = new Set(pending.editable || []);
+  const args = node.querySelector("[data-args]");
+  const edits = node.querySelector("[data-edits]");
+  const inputs = new Map();
+
+  for (const [name, value] of Object.entries(pending.args || {})) {
+    if (editable.has(name)) {
+      const field = clone("tpl-approval-field");
+      field.querySelector("[data-name]").textContent = name;
+      const input = field.querySelector("[data-value]");
+      input.value = String(value ?? "");
+      inputs.set(name, input);
+      edits.append(field);
+    } else {
+      // Not editable, so shown as plain text: the recipient of an effect is
+      // what the human is approving, not something they may rewrite.
+      const row = clone("tpl-approval-arg");
+      row.querySelector("[data-name]").textContent = `${name}:`;
+      row.querySelector("[data-value]").textContent = String(value ?? "");
+      args.append(row);
+    }
+  }
+
+  const buttons = node.querySelectorAll("button");
+  const decide = async (decision) => {
+    for (const button of buttons) button.disabled = true;
+    const changed = {};
+    for (const [name, input] of inputs) {
+      if (input.value !== String(pending.args[name] ?? "")) changed[name] = input.value;
+    }
+    await resume(pending, decision, changed);
+    node.remove();
+  };
+
+  node.querySelector("[data-approve]").addEventListener("click", () => decide("approve"));
+  node.querySelector("[data-decline]").addEventListener("click", () => decide("reject"));
+  els.messages.append(card);
+  scrollToBottom();
+}
+
+/** Send the decision and draw whatever the finished turn came back with. */
+async function resume(pending, decision, edits) {
+  const typing = clone("tpl-typing");
+  els.messages.append(typing);
+  scrollToBottom();
+
+  try {
+    const response = await fetch(`/threads/${encodeURIComponent(state.threadId)}/resume`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        user_id: state.userId,
+        call_id: pending.call_id,
+        decision,
+        edits,
+      }),
+    });
+    const body = await response.json().catch(() => null);
+    if (!response.ok) {
+      throw new Error((body && body.detail) || `The server returned ${response.status}.`);
+    }
+
+    const bubble = addAssistantMessage();
+    renderAnswer(bubble.answer, body.answer);
+    renderSources(bubble.sources, body.citations);
+  } catch (error) {
+    const node = clone("tpl-error");
+    node.querySelector("[data-detail]").textContent = error.message || "The decision failed.";
+    els.messages.append(node);
+  } finally {
+    typing.remove();
+    scrollToBottom();
     refreshSidebar();
   }
 }

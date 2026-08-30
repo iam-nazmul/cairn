@@ -98,21 +98,27 @@ Every answer has a **Copy** button, and every code block a **Copy** and a
 **Download**. Copying gives you the Markdown behind the answer rather than the
 formatted text, so it pastes into a document or an editor unchanged.
 
-### Chat or Agent
+### Chat, Agent or Research
 
-Above the message box are two modes. They change how hard cairn looks for
+Above the message box are three modes. They change how hard cairn looks for
 evidence — never how freely it answers.
 
 | | What it does | Good for |
 |---|---|---|
 | **Chat** | Searches your documents once, then answers. | Most questions. Fast, one model call. |
 | **Agent** | Searches, reads what came back, rewrites the query and searches again, then answers from everything it gathered. | Vague or many-sided questions where the right words are not in the question. |
+| **Research** | Splits the work: one part gathers the evidence, another writes the answer from it and can send it back for more. | Questions worth a careful answer, where you want the writing separated from the digging. |
 
-Agent mode shows each search as it runs, so you can see what it looked for. It
-costs an extra model call per search — `AGENT_MAX_SEARCHES` is the ceiling.
+Agent and Research show each search as it runs, so you can see what was looked
+for. Each search costs a model call — `AGENT_MAX_SEARCHES` is the ceiling, and
+in Research mode `SUPERVISOR_MAX_HANDOFFS` caps how often the writer may ask for
+more.
 
-Both modes obey the same rule: an answer with nothing to cite is not given. Agent
-mode looks harder, it does not guess more.
+In Research mode the part that writes cannot search, so it can only cite what
+was actually found for it.
+
+All three obey the same rule: an answer with nothing to cite is not given. They
+look harder, they do not guess more.
 
 The stylesheet is compiled in the browser from a CDN, so the page needs internet
 on first load even though everything else runs locally. Swapping that for a
@@ -155,7 +161,45 @@ not drawn from your documents.
 | `GET /users/{user_id}/facts` | What is remembered about a user |
 | `DELETE /users/{user_id}/threads/{id}` | Erase one conversation, keeping remembered facts |
 | `DELETE /users/{user_id}` | Erase a user: every conversation and every remembered fact |
+| `GET /threads/{id}/pending` | The action a conversation is waiting for you to approve |
+| `POST /threads/{id}/resume` | Approve or decline it |
 | `GET /health` | Check it is running |
+
+## Asking before it acts
+
+Switched off unless you set `TOOLS_ENABLED=true`. With it on, the assistant can
+do things as well as answer — and anything that leaves the process, such as
+sending an email, stops and waits for you first.
+
+The turn comes back with no answer and a description of what it wants to do:
+
+```json
+{ "status": "awaiting_approval", "answer": "",
+  "pending": { "call_id": "c_7f", "tool": "send_email",
+               "args": { "to": "alice@example.com", "subject": "Deadline", "body": "..." },
+               "editable": ["body", "subject"] } }
+```
+
+Nothing has happened at this point. It happens when you say so:
+
+```bash
+curl -s localhost:8000/threads/$THREAD/resume -H 'content-type: application/json' -d '{
+  "user_id": "u_123", "call_id": "c_7f", "decision": "approve",
+  "edits": { "subject": "Expense deadline" }
+}' | jq
+```
+
+You can edit the fields listed in `editable` while approving — never the
+recipient, which is the difference between approving an action and authorising a
+different one. Declining performs nothing and tells you so. The request is parked
+on the conversation, so it survives a restart, and only the user who owns the
+conversation can decide it.
+
+In the browser this appears as a card with Approve and Decline, with the editable
+fields as text boxes. Note that small local models follow the action format
+unreliably — llama3.1 often writes the email out instead of asking to send it.
+Nothing unsafe happens when it does; you simply get an answer rather than a
+prompt.
 
 ## What it remembers
 
@@ -191,10 +235,13 @@ Everything is set through environment variables, documented with defaults in
 | `ENV` | `dev` | `dev` forgets on restart; `local` and `prod` do not |
 | `MEMORY_EXTRACTION` | `rules` | `off` to stop remembering durable facts |
 | `AGENT_MAX_SEARCHES` | `3` | Searches per turn in Agent mode; `1` makes it act like Chat |
+| `SUPERVISOR_MAX_HANDOFFS` | `2` | Research mode: times the writer may ask for more evidence |
+| `TOOLS_ENABLED` | `false` | Let it act, asking first. Needs `ENV=local` or `prod` |
 | `LOG_LEVEL` | `INFO` | Per-request timings and retrieval scores |
 
 ## For developers
 
 [SPEC.md](SPEC.md) is the design, [CLAUDE.md](CLAUDE.md) the working rules, and
 each module has its own guide: [graph](src/graph/README.md),
-[memory](src/memory/README.md), [rag](src/rag/README.md), [api](src/api/README.md).
+[memory](src/memory/README.md), [rag](src/rag/README.md), [api](src/api/README.md),
+[tools](src/tools/README.md).

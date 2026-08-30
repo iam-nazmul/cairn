@@ -107,3 +107,26 @@ def augment_query_with_history(
 def get_vector_store() -> VectorStore:
     """Default vector store. Replace the body to point at a real index."""
     return InMemoryVectorStore()
+
+
+def merge_chunks(
+    existing: list[RetrievedChunk], found: list[RetrievedChunk]
+) -> tuple[list[RetrievedChunk], int]:
+    """Combine searches, best score per source wins. Returns the new-source count.
+
+    Deduplicating by source matters for citations: the same document arriving
+    from two queries must stay one [S] block, or the answer cites two numbers for
+    one source.
+    """
+    by_source = {chunk["source"]: chunk for chunk in existing}
+    new_sources = 0
+    for chunk in found:
+        current = by_source.get(chunk["source"])
+        if current is None:
+            new_sources += 1
+            by_source[chunk["source"]] = chunk
+        elif chunk["score"] > current["score"]:
+            by_source[chunk["source"]] = chunk
+
+    merged = sorted(by_source.values(), key=lambda c: (-c["score"], c["source"]))
+    return merged, new_sources

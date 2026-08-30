@@ -7,14 +7,16 @@ import logging
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from typing import Any, Literal
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
+from langgraph.types import Command
 from pydantic import BaseModel, Field
 
 from src.api import web
-from src.config import Context, Mode, get_settings
+from src.config import Context, Mode, Settings, get_settings
 from src.graph.build import build_graph
 from src.memory.checkpointer import checkpointer_scope
 from src.memory.facts import load_user_facts
@@ -22,7 +24,7 @@ from src.memory.store import store_scope
 from src.memory.threads import forget_thread, forget_user, list_threads
 from src.observability import configure_logging
 from src.rag.llm import explain, probe, unreachable_hint
-from src.rag.prompts import cited_chunks
+from src.rag.prompts import cited_chunks, cited_evidence
 
 logger = logging.getLogger("cairn.api")
 
@@ -41,9 +43,34 @@ class Citation(BaseModel):
 
 
 class ChatResponse(BaseModel):
+    """A turn's outcome. `awaiting_approval` means nothing was answered and
+    nothing was done: the run is parked on a checkpoint until someone decides."""
+
     answer: str
     citations: list[Citation]
     thread_id: str
+    status: Literal["answered", "awaiting_approval"] = "answered"
+    pending: dict[str, Any] | None = None
+
+
+class ResumeRequest(BaseModel):
+    """A decision on one pending call. `call_id` pins which one."""
+
+    user_id: str = Field(min_length=1)
+    call_id: str = Field(min_length=1)
+    decision: Literal["approve", "reject"]
+    # Applied only to fields the tool declared editable; the rest is ignored.
+    edits: dict[str, Any] = Field(default_factory=dict)
+
+
+class PendingResponse(BaseModel):
+    thread_id: str
+    call_id: str
+    tool: str
+    args: dict[str, Any]
+    editable: list[str]
+    preview: str
+    requested_at: str
 
 
 class NewThreadResponse(BaseModel):
@@ -141,10 +168,16 @@ def _turn(body: ChatRequest) -> tuple[dict[str, Any], dict[str, Any], Context]:
 
 
 def _citations(result: dict[str, Any]) -> list[Citation]:
-    return [
-        Citation(source=chunk["source"], score=chunk["score"])
-        for chunk in cited_chunks(result.get("answer") or "", result.get("retrieved") or [])
-    ]
+    answer = result.get("answer") or ""
+    evidence = result.get("evidence") or []
+    # Research mode cites by the id the researcher minted, not by position in a
+    # list the writer never saw (SPEC §13.4).
+    cited = (
+        cited_evidence(answer, evidence)
+        if evidence
+        else cited_chunks(answer, result.get("retrieved") or [])
+    )
+    return [Citation(source=item["source"], score=item["score"]) for item in cited]
 
 
 @app.post("/chat")
@@ -159,9 +192,114 @@ async def chat(request: Request, body: ChatRequest) -> ChatResponse:
         # 503, not 500: the model is a dependency that is down, not a bug here.
         raise HTTPException(503, detail=explain(exc, request.app.state.settings)) from exc
 
+    return _response(body.thread_id, result)
+
+
+async def _require_owner(request: Request, user_id: str, thread_id: str) -> None:
+    """403 unless this thread is in the user's index.
+
+    Leak-free: the answer is the same for a thread that does not exist and one
+    that belongs to somebody else, and without the check anyone who guessed a
+    `thread_id` could approve another user's pending action (SPEC §13.3).
+    """
+    if thread_id not in await list_threads(request.app.state.store, user_id):
+        raise HTTPException(403, detail=f"thread {thread_id!r} does not belong to {user_id!r}")
+
+
+async def _pending_action(graph: Any, thread_id: str) -> dict[str, Any] | None:
+    """The interrupt payload parked on this thread, if any."""
+    snapshot = await graph.aget_state({"configurable": {"thread_id": thread_id}})
+    interrupts = getattr(snapshot, "interrupts", ()) or ()
+    return dict(interrupts[0].value) if interrupts else None
+
+
+def _expired(pending: dict[str, Any], settings: Settings) -> bool:
+    """A checkpoint pending for a week is a stale intention (SPEC §13.3)."""
+    try:
+        requested = datetime.fromisoformat(str(pending.get("requested_at")))
+    except ValueError:
+        return False
+    age = (datetime.now(UTC) - requested).total_seconds()
+    return age > settings.approval_ttl_seconds
+
+
+def _interrupted(result: dict[str, Any]) -> dict[str, Any] | None:
+    interrupts = result.get("__interrupt__") or []
+    return dict(interrupts[0].value) if interrupts else None
+
+
+def _response(thread_id: str, result: dict[str, Any]) -> ChatResponse:
+    pending = _interrupted(result)
+    if pending is not None:
+        return ChatResponse(
+            answer="",
+            citations=[],
+            thread_id=thread_id,
+            status="awaiting_approval",
+            pending=pending,
+        )
     return ChatResponse(
-        answer=result["answer"], citations=_citations(result), thread_id=body.thread_id
+        answer=result.get("answer") or "", citations=_citations(result), thread_id=thread_id
     )
+
+
+@app.get("/threads/{thread_id}/pending")
+async def pending_approval(
+    request: Request, thread_id: str, user_id: str = Query(min_length=1)
+) -> PendingResponse:
+    """What this thread is waiting for a decision on."""
+    await _require_owner(request, user_id, thread_id)
+
+    pending = await _pending_action(request.app.state.graph, thread_id)
+    if pending is None:
+        raise HTTPException(404, detail=f"no pending approval on thread {thread_id!r}")
+
+    return PendingResponse(
+        thread_id=thread_id,
+        call_id=str(pending["call_id"]),
+        tool=str(pending["tool"]),
+        args=dict(pending["args"]),
+        editable=list(pending.get("editable") or []),
+        preview=str(pending.get("preview") or ""),
+        requested_at=str(pending.get("requested_at") or ""),
+    )
+
+
+@app.post("/threads/{thread_id}/resume")
+async def resume_approval(request: Request, thread_id: str, body: ResumeRequest) -> ChatResponse:
+    """Decide a pending call and finish the turn (SPEC §13.3)."""
+    graph = request.app.state.graph
+    settings: Settings = request.app.state.settings
+    await _require_owner(request, body.user_id, thread_id)
+
+    pending = await _pending_action(graph, thread_id)
+    if pending is None:
+        raise HTTPException(404, detail=f"no pending approval on thread {thread_id!r}")
+    if str(pending.get("call_id")) != body.call_id:
+        raise HTTPException(
+            409, detail=f"thread {thread_id!r} is waiting on {pending.get('call_id')!r}"
+        )
+
+    # An expired approval is still resumed -- as a rejection, so the turn ends
+    # instead of leaving a checkpoint parked forever.
+    expired = _expired(pending, settings)
+    decision = "reject" if expired else body.decision
+
+    config = {"configurable": {"thread_id": thread_id}}
+    try:
+        result: dict[str, Any] = await graph.ainvoke(
+            Command(resume={"decision": decision, "edits": body.edits}),
+            config,
+            context=Context(user_id=body.user_id),
+        )
+    except Exception as exc:
+        logger.exception("resume thread=%s FAILED", thread_id)
+        raise HTTPException(503, detail=explain(exc, settings)) from exc
+
+    if expired:
+        raise HTTPException(410, detail=f"approval {body.call_id!r} expired and was declined")
+
+    return _response(thread_id, result)
 
 
 def _sse(event: dict[str, Any]) -> str:
@@ -178,9 +316,10 @@ async def chat_stream(request: Request, body: ChatRequest) -> StreamingResponse:
     """The same turn as `POST /chat`, emitted as it is produced.
 
     Events are SSE JSON: `token` (a fragment of the answer), `restart` (discard
-    what was drawn -- see below), `final` (authoritative answer + citations), and
-    `error`. A provider that does not stream degrades to one `token` carrying the
-    whole answer, so the browser needs no separate path for it.
+    what was drawn -- see below), `final` (authoritative answer + citations),
+    `interrupt` (the turn is parked on an approval, SPEC §13.3), and `error`. A
+    provider that does not stream degrades to one `token` carrying the whole
+    answer, so the browser needs no separate path for it.
     """
     graph = request.app.state.graph
     payload, config, context = _turn(body)
@@ -202,7 +341,8 @@ async def chat_stream(request: Request, body: ChatRequest) -> StreamingResponse:
                     # Agent mode can sit through several searches before a token
                     # appears; show the work rather than an idle spinner. Chat
                     # mode's single search is implicit, so its stream is unchanged.
-                    searches = (result.get("searches") or []) if body.mode == "agent" else []
+                    multi_step = body.mode in ("agent", "research")
+                    searches = (result.get("searches") or []) if multi_step else []
                     for query in searches[reported_searches:]:
                         yield _sse(
                             {
@@ -218,7 +358,7 @@ async def chat_stream(request: Request, body: ChatRequest) -> StreamingResponse:
                 # write_memory also calls a model under MEMORY_EXTRACTION=llm.
                 # Only the two answering nodes may reach the browser.
                 node = str(metadata.get("langgraph_node", ""))
-                if node not in ("generate", "clarify"):
+                if node not in ("generate", "clarify", "compose"):
                     continue
                 text = _chunk_text(chunk)
                 if not text:
@@ -236,6 +376,18 @@ async def chat_stream(request: Request, body: ChatRequest) -> StreamingResponse:
             # The status line is long gone by now, so the diagnosis has to travel
             # in the event body.
             yield _sse({"type": "error", "detail": explain(exc, request.app.state.settings)})
+            return
+
+        # An interrupt does not surface as a stream part, so the checkpoint is
+        # the authority on whether this turn ended parked.
+        pending = _interrupted(result) or await _pending_action(graph, body.thread_id)
+        if pending is not None:
+            if streaming_node:
+                # The tool directive streamed as if it were an answer, exactly
+                # like a draft that turns out to be uncited: the browser must
+                # drop it before the approval prompt goes up.
+                yield _sse({"type": "restart"})
+            yield _sse({"type": "interrupt", "pending": pending, "thread_id": body.thread_id})
             return
 
         yield _sse(

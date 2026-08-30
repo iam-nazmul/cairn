@@ -6,14 +6,16 @@ from dataclasses import dataclass
 from functools import lru_cache
 from typing import Literal
 
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 Env = Literal["dev", "local", "prod"]
 
 # "chat" retrieves once. "agent" may search repeatedly, refining the query from
-# what came back. Both must cite: the mode changes how evidence is gathered, not
-# whether an answer needs any.
-Mode = Literal["chat", "agent"]
+# what came back. "research" splits the work between a researcher that gathers
+# and a writer that composes. All three must cite: the mode changes how evidence
+# is gathered, not whether an answer needs any.
+Mode = Literal["chat", "agent", "research"]
 
 
 @dataclass(frozen=True)
@@ -74,6 +76,28 @@ class Settings(BaseSettings):
     # Stop early once retrieval is already this good; refining past it spends a
     # model call to re-find what has been found.
     agent_good_score: float = 0.5
+
+    # Tools and approval (SPEC §13.3). Off by default: a graph that can act is a
+    # different risk profile from one that can only read.
+    tools_enabled: bool = False
+    # Tool calls per turn. Each one costs another `generate` pass.
+    tool_max_calls: int = 2
+    # A checkpoint pending for a week is a stale intention that may no longer be wanted.
+    approval_ttl_seconds: int = 86400
+
+    # Researcher + writer (SPEC §13.4). Hand-offs between the two after the
+    # writer fails to cite. Without a ceiling they can pass work back forever.
+    supervisor_max_handoffs: int = 2
+
+    @model_validator(mode="after")
+    def _tools_need_a_durable_checkpointer(self) -> Settings:
+        """ENV=dev loses a pending approval on restart, abandoning the turn silently."""
+        if self.tools_enabled and self.env == "dev":
+            raise ValueError(
+                "TOOLS_ENABLED requires ENV=local or ENV=prod: the in-memory "
+                "checkpointer drops a pending approval on restart (SPEC §13.3)"
+            )
+        return self
 
 
 @lru_cache(maxsize=1)

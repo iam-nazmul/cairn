@@ -4,10 +4,11 @@
 **Owner:** _Md. Nazmul Hossain_
 **Last updated:** 2026-08-27
 
-> **§13 (Agent Mode) added 2026-08-27.** §13.2 is implemented (M5). §13.3 and
-> §13.4 are **design only, not built** — no code in the repository implements
-> them. Sections 1–12 keep their original numbering because code comments and
-> `CLAUDE.md` cite them by number.
+> **§13 (Agent Mode) added 2026-08-27.** All three phases are implemented:
+> §13.2 multi-step routing (M5), §13.3 tools and approval (M6), §13.4 researcher
+> + writer (M7). Each section records the amendments made at implementation time
+> and the tests that hold it. Sections 1–12 keep their original numbering because
+> code comments and `CLAUDE.md` cite them by number.
 
 ---
 
@@ -15,7 +16,7 @@
 
 Build a Retrieval-Augmented Generation (RAG) chatbot that answers questions grounded in a private knowledge base and **remembers the conversation across turns and sessions**. Memory is provided by LangGraph's persistence layer: a **checkpointer** for short-term, thread-scoped conversation state, and a **store** for long-term, cross-thread facts. The chatbot is orchestrated as a LangGraph state graph so that retrieval, generation, and memory read/write are explicit, inspectable, and resumable.
 
-The graph runs in one of two **modes**, chosen per turn (§13): `chat` retrieves once and answers; `agent` may search repeatedly, rewriting the query from what it found. The mode changes how evidence is gathered — never what may be answered without it.
+The graph runs in one of three **modes**, chosen per turn (§13): `chat` retrieves once and answers; `agent` may search repeatedly, rewriting the query from what it found; `research` splits the turn between a researcher that gathers evidence and a writer that composes from it. The mode changes how evidence is gathered — never what may be answered without it.
 
 ## 2. Goals
 
@@ -29,7 +30,7 @@ The graph runs in one of two **modes**, chosen per turn (§13): `chat` retrieves
 ## 3. Non-Goals
 
 - Model fine-tuning or training of custom LLMs.
-- ~~Multi-agent orchestration beyond a single retrieval-and-answer graph (may be a later phase).~~ — **AMENDED (§13).** The later phase is now specified. Multi-step routing within one graph is built (§13.2); human-in-the-loop approval (§13.3) and a researcher/writer split (§13.4) are designed and scheduled as M6 and M7. Still out of scope: agents that other systems can call as services, and any topology beyond the ones §13.4 names.
+- ~~Multi-agent orchestration beyond a single retrieval-and-answer graph (may be a later phase).~~ — **AMENDED (§13), DONE.** Multi-step routing (§13.2), human-in-the-loop approval over side-effecting tools (§13.3) and the researcher/writer split (§13.4) are all built. Still out of scope: agents that other systems can call as services, and any topology beyond the researcher/writer pair — no third subagent, no agent-to-agent calls that skip the supervisor.
 - Building the ingestion/ETL pipeline for the corpus (assumed to exist or covered by a separate spec; see §11 open questions).
 - A production-grade auth system — this spec assumes an authenticated `user_id` and `thread_id` are provided by the calling layer. **This bounds §13.3:** an approval is only as trustworthy as the identity of whoever gave it, so the approver is whoever the calling layer already authenticated.
 
@@ -40,10 +41,14 @@ The graph runs in one of two **modes**, chosen per turn (§13): `chat` retrieves
 - **Checkpointer** — the storage backend that writes/reads checkpoints. Provides **short-term, thread-scoped memory**.
 - **Store** — a separate key-value/semantic store for **long-term, cross-thread memory** (survives across different `thread_id`s, typically scoped by `user_id`).
 - **RAG** — retrieve relevant chunks from a vector index, then condition generation on them.
-- **Mode** — `chat` or `agent`, chosen per turn. Travels in `context=`, not in `configurable`, because it is not a property of the thread: one conversation may mix both.
+- **Mode** — `chat`, `agent` or `research`, chosen per turn. Travels in `context=`, not in `configurable`, because it is not a property of the thread: one conversation may mix all three.
 - **Router** — a function on a conditional edge that reads state and names the next node. Routers decide; nodes do work. A router must stay free of side effects, because the same state can be routed more than once.
 - **Interrupt** — a pause raised by `interrupt()` inside a node, which suspends the run and persists it to the checkpointer. Resumed by invoking the graph again on the **same `thread_id`** with `Command(resume=...)`. See §13.3.
+- **Tool** — a named function the model may ask to run, declared in a registry with an `effect` of `read` or `write`. `write` means the effect leaves the process and needs approval; it is the default (§13.3).
+- **Approval** — a human decision on one proposed `write` tool call, identified by its `call_id` and scoped to the thread it was raised on.
 - **Subagent** — a compiled graph used as a node inside another graph. The unit of composition in §13.4.
+- **Evidence** — the deduplicated `{id, text, source, score}` set a researcher hands to a writer. The `id` is minted by the researcher and is what makes a citation traceable across the handoff (§13.4).
+- **Supervisor** — the router that decides which subagent runs next. It reads state; it does not call a model (§13.4).
 
 ## 5. Architecture Overview
 
@@ -106,12 +111,34 @@ class ChatState(TypedDict):
     answer: str                               # final grounded answer
     searches: list[str]                       # agent mode: queries tried this turn
     new_hits: int                             # agent mode: sources the last search added
+
+    tool_request: str                         # the raw TOOL directive generate emitted
+    pending_action: dict | None               # tool call awaiting approval
+    tool_calls: list[dict]                    # calls decided this turn; makes act idempotent
+    evidence: list[Evidence]                  # the researcher -> writer handoff
+    preferences: list[str]                    # the half of the facts the writer gets
+    handoffs: int                             # times the writer sent work back
+    last_agent: str                           # which subagent ran last
 ```
 
 > **Amended (M5).** `searches` and `new_hits` were added for agent mode (§13.2).
 > Both are **per turn**, but the checkpointer keeps last turn's values, so
 > `load_memory` clears them (along with `retrieved`) at the start of every turn.
 > Without that reset, a second question merges into chunks found for the first.
+
+> **Amended (M6).** `tool_request` was added at implementation time: `generate`
+> signals that it wants a tool, and `plan` — the only node allowed to propose an
+> effect — resolves the directive into a call. All three tool fields reset in
+> `load_memory` with the rest of the per-turn state, which is what makes
+> `TOOL_MAX_CALLS` a per-turn budget rather than a lifetime one for the thread.
+> They live in the checkpoint, never the Store (§7).
+
+> **Amended (M7).** `evidence` is the only key that crosses out of the
+> researcher's own state. The other three are the parent's own bookkeeping:
+> `preferences` is loaded beside `long_term_facts` so the writer can be given the
+> half that shapes tone without the half that is a retrieval hint, and
+> `handoffs` / `last_agent` are what let the supervisor stay a router — a
+> function of state rather than something that remembers.
 
 ### 6.2 Nodes
 
@@ -121,6 +148,8 @@ class ChatState(TypedDict):
 4. **`write_memory`** — optionally extract durable facts/preferences from the turn and upsert them to the Store.
 5. **`research`** *(agent mode only, M5)* — ask the model for a better query given what is still missing, search again, and merge the results into `retrieved`. Never reached in chat mode. See §13.2.
 6. **`clarify`** *(M1)* — the no-answer path: say what could not be found instead of answering from priors.
+7. **`plan` / `approve` / `act`** *(M6)* — propose a tool call, suspend for a human decision on a `write` effect, then perform it exactly once. `act` merges the result into `retrieved` and hands the turn back to `generate`. §13.3.
+8. **`researcher` / `writer`** *(M7)* — compiled subgraphs (`src/graph/subagents.py`) invoked from wrapper nodes, sequenced by the supervisor router. The researcher searches and mints evidence ids; the writer composes and cites, with no vector store to search. §13.4.
 
 ### 6.3 Edges
 
@@ -130,6 +159,10 @@ class ChatState(TypedDict):
 
 - after `retrieve` **and** after `research` — the same router on both, deciding `generate` / `clarify` / `research` (§13.2);
 - after `generate` — an answer that cites nothing falls through to `clarify` rather than shipping as grounded.
+
+**Also DONE (M7).** A third conditional edge leaves `load_memory`: `route_by_mode` sends a `research` turn to the `researcher` subagent instead of `retrieve`, and the supervisor — one router bound to **both** subagents, for the same reason one router governs the research loop — decides `writer` / `researcher` / `clarify` / `write_memory` from there.
+
+**DONE (M6).** The second of these gained a `plan` destination rather than a third router being added, and two routers now govern the tool path: `route_after_plan` (`approve` for a `write` effect, `act` for a `read` one, `clarify` for a call the registry does not have) and `route_after_approval` (`act` when the human approved, `clarify` when they did not). `act → generate` closes the loop, bounded by `TOOL_MAX_CALLS`.
 
 ### 6.4 Compilation & invocation
 
@@ -173,6 +206,7 @@ The `thread_id` is the key: same `thread_id` ⇒ same restored conversation stat
   - **Local / staging:** SQLite saver — durable across process restarts, single node.
   - **Production:** Postgres saver — durable, concurrent, horizontally scalable, crash recovery.
 - The graph code MUST be identical across backends; only the checkpointer instance changes.
+- **Approval flows (§13.3) require `ENV=local` or `ENV=prod`.** The in-memory saver loses a pending approval on restart, silently abandoning the turn; `Settings` refuses `TOOLS_ENABLED` under `ENV=dev` rather than discovering this at the first interrupt.
 
 ### 7.2 Long-term (store)
 
@@ -201,7 +235,7 @@ Request:
 { "user_id": "u_123", "thread_id": "t_abc", "message": "...", "mode": "chat" }
 ```
 
-`mode` is `"chat"` (default) or `"agent"`. It MUST default to `chat`, so callers written before §13 keep their behaviour, and an unrecognised value MUST be rejected rather than silently treated as `chat`.
+`mode` is `"chat"` (default), `"agent"` or `"research"`. It MUST default to `chat`, so callers written before §13 keep their behaviour, and an unrecognised value MUST be rejected rather than silently treated as `chat` — a 422, which is what let §13.4 add a third mode without breaking older clients.
 
 Response:
 ```json
@@ -219,7 +253,10 @@ Supporting endpoints:
 - `GET /health` — liveness/readiness.
 - `DELETE /users/{user_id}` — right-to-be-forgotten (§10).
 
-§13.3 adds two more when it is built (`GET`/`POST` on a thread's pending approval); they are specified there, not here, because nothing implements them yet.
+- `GET /threads/{thread_id}/pending?user_id=…` — the approval this thread is parked on, or 404 (§13.3).
+- `POST /threads/{thread_id}/resume` — decide it and finish the turn (§13.3).
+
+`POST /chat` has a second terminal state: `{"status": "awaiting_approval", "pending": {…}}` instead of an answer. `status` defaults to `"answered"`, so a caller that ignores it is unaffected until tools are switched on.
 
 ## 10. Non-Functional Requirements
 
@@ -228,7 +265,7 @@ Supporting endpoints:
 - **Durability:** production checkpointer survives process/host restarts with no lost committed turns.
 - **Observability:** log per-node timing, retrieval hits/scores, and token usage; expose graph state for a given checkpoint for debugging.
 - **Security/Privacy:** conversation state and long-term facts are user-scoped; support deletion of a user's threads and stored facts (right-to-be-forgotten).
-- **Cost control:** cap retrieved-context size and history length passed to the LLM (context-window management / trimming or summarization for long threads).
+- **Cost control:** cap retrieved-context size and history length passed to the LLM (context-window management / trimming or summarization for long threads). Every loop the graph can enter MUST carry a ceiling: `AGENT_MAX_SEARCHES` (§13.2), `TOOL_MAX_CALLS` (§13.3), `SUPERVISOR_MAX_HANDOFFS` (§13.4).
 
 ## 11. Risks & Open Questions
 
@@ -262,8 +299,8 @@ Supporting endpoints:
 3. **M3 — Long-term memory:** Store integration, `load_memory` / `write_memory` nodes, cross-thread facts.
 4. **M4 — Production hardening:** Postgres checkpointer + store, observability, context trimming/summarization, deletion APIs, evals.
 5. **M5 — Agent mode (multi-step routing):** ✅ **done.** `chat` / `agent` modes, the `research` node, one router governing the loop, search budget, streamed search events, browser UI. §13.2.
-6. **M6 — Tools and human-in-the-loop:** side-effecting tools plus `interrupt()`-based approval before any of them run. §13.3. **Depends on M5.**
-7. **M7 — Researcher + writer (multi-agent):** split retrieval from composition into two subagents under a supervisor. §13.4. **Depends on M6** — a researcher that can act needs the approval gate first.
+6. **M6 — Tools and human-in-the-loop:** ✅ **done.** Tool registry with effect classes, `plan` / `approve` / `act`, `interrupt()`-based approval, per-turn tool budget, pending/resume endpoints, `interrupt` stream event. §13.3.
+7. **M7 — Researcher + writer (multi-agent):** ✅ **done.** `research` mode, the researcher and writer subgraphs, the supervisor router, evidence ids that survive the hand-off, the hand-off ceiling, and a third button in the UI. §13.4.
 ---
 
 ## 13. Agent Mode
@@ -285,6 +322,7 @@ extend that test rather than exempt itself from it.
 |---|---|---|
 | `chat` | Retrieve once, then answer. | 1 model call |
 | `agent` | Retrieve, judge, optionally rewrite the query and search again, then answer from everything gathered. | 1 + N model calls, N ≤ `AGENT_MAX_SEARCHES` − 1 |
+| `research` | A researcher gathers and judges sufficiency; a writer composes from the evidence and may hand the work back. | 1 + N + H, H ≤ `SUPERVISOR_MAX_HANDOFFS` |
 
 Mode is chosen **per turn**, not per thread. A conversation may mix both, and the
 checkpoint records which mode produced each answer. It travels in `context=`
@@ -321,9 +359,18 @@ query and nothing else.
 |---|---|
 | best score ≥ `AGENT_GOOD_SCORE` | Retrieval already worked; another rewrite re-finds what is there. |
 | `len(searches)` ≥ `AGENT_MAX_SEARCHES` | The cost ceiling for a turn (§10). Counts the first search, so `1` makes agent mode behave exactly like chat. |
-| `new_hits == 0` | The last rewrite surfaced no new source, so refining has stopped paying for itself. |
+| `new_hits == 0` **after at least one `research` pass** (`len(searches) > 1`) | The last rewrite surfaced no new source, so refining has stopped paying for itself. The guard matters: an empty *first* search is not a stop condition — it is precisely the case agent mode exists for, so it routes to `research`. |
 
 Then the ordinary verdict applies: below `RETRIEVAL_MIN_SCORE`, `clarify`.
+
+**Knobs** (`src/config.py`), listed because §13.3 and §13.4 add ceilings alongside them:
+
+| Key | Default | Meaning |
+|---|---|---|
+| `RETRIEVAL_MIN_SCORE` | `0.05` | Below this, no answer ships. Identical in every mode. |
+| `RETRIEVAL_TOP_K` | `4` | Chunks per search. |
+| `AGENT_MAX_SEARCHES` | `3` | Searches per turn, counting the first. `1` makes agent mode behave like chat. |
+| `AGENT_GOOD_SCORE` | `0.5` | Stop refining: retrieval already worked. |
 
 **Merging.** Chunks from several searches MUST be deduplicated by `source`,
 keeping the best score. This is a correctness requirement, not tidiness: the same
@@ -339,82 +386,230 @@ there is, and the extra model call buys nothing. Agent mode is worth its cost on
 vague or many-sided questions over a large corpus; it is not a better default.
 Hence per-turn selection rather than a global setting.
 
-### 13.3 Human-in-the-loop approval — *designed, NOT built (M6)*
+### 13.3 Human-in-the-loop approval — *implemented (M6)*
 
-> **Nothing in the repository implements this.** Agent mode today is read-only:
-> it searches a vector index and writes durable facts, and neither warrants an
-> approval prompt. **This phase is meaningless until side-effecting tools exist**,
-> which is why M6 is scoped as *tools **and** approval*, not approval alone. A
-> gate with nothing behind it is theatre.
+> **Built as designed**, with the amendments recorded at the end of this section.
+> M6 was scoped as *tools **and** approval*, not approval alone, because a gate
+> with nothing behind it is theatre: before it, the graph could only read.
+> `TOOLS_ENABLED` is off by default — a graph that can act is a different risk
+> profile from one that can only search.
 
 **Requirement.** Before executing any tool marked as having external effects, the
 graph MUST suspend, surface what it intends to do, and wait for an explicit human
 decision. It MUST NOT perform the effect and then ask.
 
-**Mechanism.** LangGraph's `interrupt()` (`langgraph.types`), which suspends the
-run and persists it to the checkpointer. The run is resumed by invoking the graph
-on the **same `thread_id`** with `Command(resume=<decision>)`; the resume value
-becomes the return value of `interrupt()` inside the node.
+#### The tool registry
+
+```python
+@dataclass(frozen=True)
+class Tool:
+    name: str
+    description: str                       # shown to the model
+    effect: Literal["read", "write"] = "write"
+    editable_fields: frozenset[str] = frozenset()
+    run: Callable[..., Awaitable[str]]
+```
+
+`effect` defaults to `"write"`, so a tool needs approval **unless it declares
+itself safe**. This resolves the first open question in favour of failing closed:
+the realistic mistake is adding a tool and forgetting to classify it, and the two
+failures are not symmetric — a misfiled `read` costs one unnecessary prompt, a
+misfiled `write` sends an email nobody approved.
+
+#### Graph shape
+
+```
+generate ──▶ «route_after_generate» ──▶ write_memory   (answered, no tool wanted)
+                        ├────────────▶ clarify        (uncited -- unchanged)
+                        └────────────▶ plan           (model requested a tool)
+
+plan ──▶ «route_after_plan» ──▶ act        (effect="read": just run it)
+                   └─────────▶ approve     (effect="write": interrupt() here)
+
+approve ──▶ «route_after_approval» ──▶ act       (approved, possibly edited)
+                        └───────────▶ clarify   (rejected: say what was not done)
+
+act ──▶ generate      (bounded by TOOL_MAX_CALLS, then straight to write_memory)
+```
+
+`plan` selects the tool and arguments and does nothing else — it is the only node
+that may propose an effect. `approve` contains the `interrupt()` and nothing
+else. `act` performs the effect and has no `interrupt()`, so it is never replayed
+by a resume.
+
+**Tool output is evidence, not an exemption.** `act` merges its result into
+`retrieved` as an ordinary chunk with `source: "tool://<name>/<call_id>"` and
+`score: 1.0`, so the existing citation gate applies to a tool-derived answer
+byte for byte — a claim about what the tool returned must cite the call that
+returned it. The alternative, a separate `tool_results` key with its own
+grounding check, is rejected for exactly the reason §13.2 forbids a second
+router: a duplicated grounding gate is a gate that will drift. Cost of the choice:
+`score: 1.0` asserts "the system produced this on request", which is not a
+similarity score and will look odd in retrieval telemetry; it MUST be excluded
+from retrieval-quality metrics by its `tool://` scheme.
+
+#### Interrupt mechanics
+
+LangGraph's `interrupt()` (`langgraph.types`) suspends the run and persists it to
+the checkpointer. The run resumes by invoking the graph on the **same
+`thread_id`** with `Command(resume=<decision>)`; the resume value becomes the
+return value of `interrupt()` inside the node.
 
 ```python
 from langgraph.types import Command, interrupt
 
 decision = interrupt({
+    "call_id": call_id,
     "action": "send_email",
     "to": to, "subject": subject, "body": body,
 })
 if decision.get("approve") is not True:
-    return "cancelled by the user"
-# the effect happens only past this line
+    return {"pending_action": None, "answer": "cancelled by the user"}
+# the effect happens only past this line -- in `act`, one edge later
 ```
 
-**Three constraints that are easy to get wrong:**
+**Four constraints that are easy to get wrong:**
 
 1. **Resuming re-runs the node from its start**, not from the `interrupt()` call.
    Any work before `interrupt()` executes a second time. Therefore a node
    containing `interrupt()` MUST do nothing observable before it — no writes, no
    sends, no counters. Put the effect strictly *after* the call.
-2. **A durable checkpointer is mandatory.** Under `ENV=dev` the in-memory saver
+2. **An effect must be idempotent across resumes.** `plan` mints a `call_id`;
+   `act` appends it to `tool_calls` before returning, and re-entering `act` with
+   a `call_id` already recorded is a no-op returning the stored result. Without
+   this, a client that posts the same approval twice — a double-click, a retry
+   after a timeout — sends two emails, and the checkpoint cannot tell them apart.
+3. **A durable checkpointer is mandatory.** Under `ENV=dev` the in-memory saver
    loses a pending approval on restart, silently abandoning the turn. §7.1's
    backend table therefore gains a rule: **approval flows require `ENV=local` or
-   `ENV=prod`.**
-3. **An approval is scoped to the thread it was raised on.** Resuming MUST verify
-   the `user_id` owns that thread, exactly as `DELETE /users/{id}/threads/{id}`
-   does — otherwise anyone who guesses a `thread_id` can approve someone else's
-   pending action. §3's authentication boundary defines who the approver is.
+   `ENV=prod`**, and the API MUST refuse to enable tools under `ENV=dev` rather
+   than discover this at the first interrupt.
+4. **An approval is scoped to the thread it was raised on.** Resuming MUST verify
+   the `user_id` owns that thread, exactly as `DELETE /users/{id}` does —
+   otherwise anyone who guesses a `thread_id` can approve someone else's pending
+   action. §3's authentication boundary defines who the approver is.
 
-**API surface** (added to §9 when built):
+#### API surface (added to §9 when built)
 
 | Endpoint | Purpose |
 |---|---|
 | `GET /threads/{thread_id}/pending` | The interrupt payload awaiting a decision, or 404. |
 | `POST /threads/{thread_id}/resume` | Body carries the decision; resumes the run. |
 
+```json
+// GET .../pending -> 200
+{ "call_id": "c_7f", "tool": "send_email", "args": {"to": "...", "subject": "...", "body": "..."},
+  "editable": ["subject", "body"], "requested_at": "2026-08-27T10:04:11Z" }
+
+// POST .../resume
+{ "user_id": "u_123", "call_id": "c_7f", "decision": "approve", "edits": {"subject": "..."} }
+```
+
+`resume` returns the same body as `POST /chat`. Status codes carry the failure
+modes that matter: **403** when `user_id` does not own the thread, **404** when
+nothing is pending, **409** when `call_id` is not the pending call (the approver
+is acting on a screen that has since moved on), **410** when the approval has
+expired.
+
 `POST /chat` and `POST /chat/stream` gain a terminal state: a turn may end
-`awaiting_approval` instead of returning an answer. Clients MUST handle it; the
-stream gains an `interrupt` event carrying the payload.
+`{"status": "awaiting_approval", "pending": {...}}` instead of returning an
+answer. Clients MUST handle it; the stream gains an `interrupt` event carrying
+the same payload, and — like the `restart` event (§13.2, streaming rule in
+`CLAUDE.md`) — anything already streamed for that turn is not an answer.
 
-**Open questions.**
-- What marks a tool as risky — a decorator, a registry, or a per-tool flag? A default of "risky unless declared safe" fails closed and is the safer default.
-- Does an approval expire? A checkpoint pending for a week is a stale intention that may no longer be wanted.
-- Is an edited approval allowed (approve *but change the recipient*), or only yes/no? Editing is more useful and materially harder to audit.
+#### Resolved open questions
 
-### 13.4 Researcher + writer — *designed, NOT built (M7)*
+- **What marks a tool as risky?** A registry field defaulting to `"write"`. Fails closed; see above.
+- **Does an approval expire?** Yes — `APPROVAL_TTL_SECONDS`, default 86400. A resume past the TTL returns 410 and resumes the run with a rejection, so a week-old intention ends the turn cleanly instead of leaving a checkpoint pending forever.
+- **Is an edited approval allowed?** Yes, but only for fields the tool lists in `editable_fields` — never the recipient of an effect, only its content. The resume record stores proposed *and* final arguments, so the audit trail shows what the human changed. Editing recipients is where approval stops being an approval.
 
-> **Nothing in the repository implements this.** Scheduled after M6 because a
-> researcher that can act needs the approval gate to exist first.
+#### Configuration
 
-**Shape.** Two subagents — compiled graphs used as nodes — under a supervisor
-that decides which runs next and when the work is done.
+| Key | Default | Meaning |
+|---|---|---|
+| `TOOLS_ENABLED` | `false` | Master switch. `false` keeps `plan`/`approve`/`act` unreachable. |
+| `TOOL_MAX_CALLS` | `2` | Tool calls per turn. Each one costs a `generate` pass. |
+| `APPROVAL_TTL_SECONDS` | `86400` | Age past which a pending approval is refused. |
+
+#### Definition of done (M6) — met
+
+`tests/test_tools_approval.py` asserts each of: a `write` tool performs **zero**
+effects before a resume; `decision: "reject"` performs none at all and the answer
+says what was not done; two resumes of one `call_id` produce **one** effect (and
+`act` alone refuses a `call_id` it already performed); a resume from a different
+`user_id` returns 403 and performs none; an expired approval is declined rather
+than performed; edits cannot reach a field the tool did not declare editable; and
+the grounding parity test extended to tool turns — a tool-derived answer that
+cites nothing still routes to `clarify`.
+
+#### Amended at implementation time (M6)
+
+- **`generate` signals, `plan` proposes.** The model's reply is a whole-reply
+  `TOOL <name> {json}` directive, carried in a new state field `tool_request`
+  (§6.1). Keeping the parse in `plan` costs nothing and keeps "only `plan` may
+  propose an effect" true rather than nearly true. A directive is not an answer,
+  so it never reaches `messages`.
+- **`tool_calls` is per turn, not per thread.** It resets in `load_memory` with
+  the rest of the per-turn state, which is what makes `TOOL_MAX_CALLS` a turn
+  budget. Idempotency only ever needs to span one run.
+- **Thread registration moved to `load_memory`.** Ownership is checked against
+  the user's thread index, and a turn that parks on an approval has not reached
+  `write_memory` yet — the owner could not resume their own thread. It also
+  closes a latent §10 gap: a thread whose turn crashed, or one written under
+  `MEMORY_EXTRACTION=off`, was invisible to deletion.
+- **`GET /threads/{id}/pending` takes `?user_id=`.** The ownership rule needs an
+  identity and a GET has no body.
+- **The stream asks the checkpoint.** An interrupt does not surface as a part of
+  `astream(stream_mode=["messages", "values"])`, so the handler reads the state
+  after the stream ends. `restart` precedes `interrupt` only if tokens were
+  actually drawn.
+- **Known limitation: tools sit behind `generate`.** A turn whose retrieval was
+  too weak routes to `clarify` and never reaches the node that could ask for a
+  tool. Actions that follow from retrieved content work; a bare "send this email"
+  on an off-corpus thread does not. Moving the tool path in front of retrieval
+  would let an action run with no evidence gathered at all, which is the trade
+  §13 exists to refuse.
+- **The directive is anchored, not whole-reply.** A model that adds a sentence
+  after the call is still asking for it; one that mentions a tool mid-answer is
+  not. The tool list is rendered as a JSON skeleton per tool, because a Python
+  signature teaches a model to reply with a Python call — measured, not assumed.
+- **Small local models comply unreliably.** llama3.1 emits the directive on some
+  runs and writes the action out as prose on others. It fails safe (no directive
+  is simply an answer), and the fix is a provider with native tool calling, which
+  would replace the directive and its parser without touching `plan` / `approve`
+  / `act`.
+- **The browser handles it.** An `interrupt` event draws an approval card: the
+  arguments as text, the editable fields as inputs, Approve and Decline. The
+  composer stays usable while a decision is open, because the approval is
+  addressed by `call_id` rather than by being next in line.
+
+### 13.4 Researcher + writer — *implemented (M7)*
+
+> **Built as designed**, with the amendments recorded at the end of this section.
+> It is a third mode rather than a replacement: `chat` and `agent` are untouched.
+
+**Shape.** Two subagents — compiled graphs invoked from wrapper nodes — plus a
+supervisor that decides which runs next and when the work is done.
 
 ```
         ┌── supervisor ──┐
         │                │
         ▼                ▼
-   researcher   ────▶  writer  ────▶ generate/END
+   researcher   ────▶  writer  ────▶ write_memory/END
    (search, gather,     (compose the answer from
     judge sufficiency)   what the researcher gathered)
 ```
+
+**The supervisor is a router, not a model call.** It reads state — did the
+researcher return evidence, did the writer hand work back, is the handoff budget
+spent — and names the next subagent. This resolves the first open question in
+favour of the cheap deterministic option: a model call to decide "the researcher
+returned nothing, ask again" buys nothing a condition on state cannot decide, and
+it costs a third call on every turn.
+
+The same supervisor is bound to **both** subagents, for the reason §13.2 binds
+one router to `retrieve` and `research`: a second one would be free to drift, and
+what it would drift on is when the evidence is good enough.
 
 **Division of labour.** The researcher owns retrieval and decides when the
 evidence is sufficient — essentially §13.2's loop, extracted. The writer owns
@@ -423,24 +618,95 @@ ability to search is how a system starts citing sources that never reached the
 answer.
 
 **State boundary.** The two MUST NOT share one flat state. The researcher's
-intermediate queries and rejected chunks are its own business; what crosses to
-the writer is the merged, deduplicated evidence set and nothing else. Shared keys
-written by a subgraph require a reducer declared in the parent (LangGraph rule),
-and `messages` in particular must not accumulate both agents' internal chatter —
-that is checkpointed per thread and would be replayed into every later turn.
+intermediate queries, rejected chunks and `new_hits` counter stay inside its own
+subgraph state. Exactly one key crosses to the writer:
+
+```python
+class Evidence(TypedDict):
+    id: str      # "S1", "S2", ... assigned by the researcher, stable for the turn
+    text: str
+    source: str
+    score: float
+```
+
+Shared keys written by a subgraph require a reducer declared in the parent
+(LangGraph rule), and `messages` in particular must not accumulate both agents'
+internal chatter — that is checkpointed per thread and would be replayed into
+every later turn. **Only the writer's final message appends to `messages`.**
 
 **Citation provenance is the hard part.** With one agent, `[S1]` indexes the list
 `generate` was handed. With two, the writer cites evidence the researcher chose,
-and the mapping must survive the handoff intact. The existing citation eval
-(§11) MUST be extended to assert that a cited chunk was actually retrieved by the
-researcher in that turn — not merely that a marker exists.
+and the mapping must survive the handoff intact — which is why the id lives on
+`Evidence` rather than being re-derived from list position on the far side. The
+writer's context is rendered from those ids (`format_evidence`), and
+`cited_evidence` matches an answer's markers against them, so a marker that
+matches no id the researcher minted this turn cites nothing however plausible it
+looks. `tests/test_multi_agent.py` holds it.
 
-**Cost.** A supervisor turn is at minimum three model calls (supervise, research,
-write) against agent mode's two and chat's one. `AGENT_MAX_SEARCHES` bounds the
-researcher; the supervisor needs its own hand-off ceiling, or two agents can pass
-work back and forth indefinitely.
+**Long-term facts split by namespace.** §7.2 already separates them, and the
+split matches the division of labour: `(user_id, "preferences")` — tone,
+language, format — goes to the writer; `(user_id, "facts")` goes to the
+researcher as retrieval hints. Neither agent gets both, and the second open
+question is resolved by that boundary rather than by duplicating the facts into
+both prompts.
 
-**Open questions.**
-- Supervisor, or a fixed `researcher → writer` sequence? A fixed sequence is cheaper and fully deterministic; a supervisor is only worth it if the writer can genuinely send work back.
-- Does the writer inherit long-term facts (§7.2), or only the researcher? Facts shape tone and language, which is the writer's concern — but they are also retrieval hints, which is the researcher's.
-- Is this mode a third value of `mode`, or does it replace `agent`? A third value keeps the migration reversible.
+**A third mode, not a replacement.** `mode: "research"` joins `chat` and `agent`
+(§9, §13.1). `agent` keeps its exact current behaviour, which keeps the migration
+reversible and keeps the §13.2 tests meaningful; §9's rule that an unrecognised
+mode is rejected already protects older clients.
+
+**Cost.** A `research`-mode turn is at minimum two model calls (research, write)
+against agent mode's two and chat's one — and up to
+`AGENT_MAX_SEARCHES + SUPERVISOR_MAX_HANDOFFS + 1`. `AGENT_MAX_SEARCHES` bounds
+the researcher; `SUPERVISOR_MAX_HANDOFFS` (default `2`) bounds the ping-pong,
+because two agents with no ceiling can pass work back and forth indefinitely. The
+ceiling counts writer attempts: it tries, hands back, is sent out once more, and
+the second failure ends the turn on the no-answer path.
+
+#### Definition of done (M7) — met
+
+`tests/test_multi_agent.py` asserts: every citation the writer emits maps to
+evidence the researcher returned this turn; the writer has no path to the vector
+store (`build_writer` takes none, and every query the corpus sees is one the
+researcher logged); `messages` after a `research` turn contains exactly one new
+assistant message; `SUPERVISOR_MAX_HANDOFFS` terminates a writer that refuses to
+cite; the grounding floor sends all three modes to `clarify` at the same value,
+through whichever decider each one routes through; and `/chat` and `/chat/stream`
+return the same answer and citations in the third mode too.
+
+#### Amended at implementation time (M7)
+
+- **`SUPERVISOR_MODEL` was not built.** The design left a model-driven supervisor
+  available behind a flag; nothing in the evals asks for one, and a setting that
+  exists but is never exercised is a claim the code does not keep. The router is
+  the whole supervisor. Add the flag when a writer actually hands back a reason a
+  condition cannot read.
+- **The writer also receives the conversation and the user's preferences.** What
+  it never receives is the researcher's queries, the chunks it rejected, or any
+  way to search — which is what the state boundary was protecting.
+- **Evidence is the accepted set, and it is where a second pass resumes.** Chunks
+  below `RETRIEVAL_MIN_SCORE` never leave the researcher's own state, so a
+  hand-back re-enters with the evidence so far rather than starting over.
+- **Facts split by namespace, as designed.** `(user_id, "facts")` widens the
+  researcher's first query; `(user_id, "preferences")` reaches only the writer.
+  A preference about tone is not a retrieval hint, and a fact about the user's
+  team is not a style instruction.
+- **`route_by_mode` branches at `load_memory`, not at `retrieve`.** A research
+  turn never enters the single-retrieval path at all, which is what keeps the
+  §13.2 tests meaningful for `agent`.
+- **Tools are not reachable in research mode.** `plan` hangs off `generate`,
+  which a research turn does not run. Composing an answer and taking an action
+  are different jobs; wiring the writer to tools would give the agent that cannot
+  search the ability to act.
+
+### 13.5 What every phase must preserve
+
+| Invariant | Enforced by |
+|---|---|
+| `RETRIEVAL_MIN_SCORE` and the citation requirement are identical in all modes | one grounding parity test, extended per phase — never exempted |
+| One router owns the answer/refuse verdict | §13.2; a second router may not re-decide it |
+| An uncited answer routes to `clarify` | `route_after_generate`, unchanged by M6/M7 |
+| Durable facts never enter `messages`; conversation never enters the Store | §7, `USER_NAMESPACES` (`src/memory/threads.py`) |
+| Effects happen after approval, exactly once | §13.3 constraints 1–2 |
+| A citation names evidence that was actually gathered this turn | `cited_chunks` / `cited_evidence`, per mode |
+| Every loop has a ceiling | `AGENT_MAX_SEARCHES`, `TOOL_MAX_CALLS`, `SUPERVISOR_MAX_HANDOFFS` |
