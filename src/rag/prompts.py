@@ -10,7 +10,7 @@ from typing import Any, cast
 from langchain.messages import AnyMessage, HumanMessage, SystemMessage
 from langchain_core.messages.utils import count_tokens_approximately, trim_messages
 
-from src.graph.state import ChatState, RetrievedChunk
+from src.graph.state import ChatState, Evidence, RetrievedChunk
 from src.tools.registry import Tool
 
 CITATION_RE = re.compile(r"\[S(\d+)\]")
@@ -43,6 +43,16 @@ missing -- different wording, a narrower aspect, or a term the documents would \
 use rather than the user's phrasing.
 
 Output the query alone: no quotes, no explanation, no prefix."""
+
+WRITER_SYSTEM = """You are the writer in a two-agent system.
+
+A researcher has already gathered the evidence below and you cannot search for \
+more. Answer using ONLY that evidence, the conversation so far, and the known \
+facts about the user. Never answer from your own prior knowledge.
+
+Every claim drawn from the evidence MUST carry its block's marker, e.g. [S1]. An \
+answer with no marker is invalid. If the evidence does not support an answer, \
+say what is missing instead of guessing -- the researcher will be sent out again."""
 
 TOOLS_SYSTEM = """You can also perform actions by calling a tool.
 
@@ -137,6 +147,50 @@ def parse_tool_request(reply: str) -> tuple[str, dict[str, Any]] | None:
     if not isinstance(args, dict) or any(not isinstance(k, str) for k in args):
         return None
     return match.group(1), cast(dict[str, Any], args)
+
+
+def format_evidence(evidence: Iterable[Evidence], max_chars: int) -> str:
+    """Render evidence under the ids the RESEARCHER assigned, not by position."""
+    items = list(evidence)
+    if not items:
+        return "Evidence: (none gathered)"
+
+    blocks: list[str] = []
+    used = 0
+    for item in items:
+        block = f"[{item['id']}] source={item['source']} score={item['score']}\n{item['text']}"
+        if used + len(block) > max_chars and blocks:
+            break
+        blocks.append(block)
+        used += len(block)
+    return "Evidence gathered for you:\n" + "\n\n".join(blocks)
+
+
+def build_writer_prompt(
+    *, evidence: Iterable[Evidence], preferences: list[str], max_chars: int
+) -> str:
+    """The writer's whole world: evidence someone else gathered, plus how this
+    user likes to be written to. No query, and nothing to search with."""
+    return "\n\n".join(
+        [WRITER_SYSTEM, format_facts(preferences), format_evidence(evidence, max_chars)]
+    )
+
+
+def cited_evidence(answer: str, evidence: Iterable[Evidence]) -> list[Evidence]:
+    """The evidence an answer actually cites, matched BY ID.
+
+    This is the hand-off's safety check: a marker that matches no id the
+    researcher minted this turn cites nothing, however plausible it looks.
+    """
+    by_id = {item["id"]: item for item in evidence}
+    seen: set[str] = set()
+    out: list[Evidence] = []
+    for match in CITATION_RE.finditer(answer):
+        marker = f"S{match.group(1)}"
+        if marker in by_id and marker not in seen:
+            seen.add(marker)
+            out.append(by_id[marker])
+    return out
 
 
 def build_system_prompt(

@@ -16,6 +16,20 @@ class RetrievedChunk(TypedDict):
     score: float
 
 
+class Evidence(TypedDict):
+    """One chunk the researcher chose, carrying the id the writer cites it by.
+
+    The id is minted once, by the researcher, and travels with the text: a
+    citation that has to be re-derived from a position in the writer's list is a
+    citation that can silently point at the wrong source (SPEC §13.4).
+    """
+
+    id: str
+    text: str
+    source: str
+    score: float
+
+
 class ChatState(TypedDict):
     """Graph state. `messages` appends via its reducer; every other field overwrites."""
 
@@ -40,3 +54,15 @@ class ChatState(TypedDict):
     # Every call decided this thread, done or rejected. `act` reads it to refuse
     # a second send of a call_id it has already performed.
     tool_calls: list[dict[str, Any]]
+
+    # Research mode (SPEC §13.4). What the researcher hands the writer -- the
+    # only key that crosses out of the researcher's own state.
+    evidence: list[Evidence]
+    # The preferences half of long_term_facts: tone and language shape how an
+    # answer is written, so they go to the writer, not the researcher.
+    preferences: list[str]
+    # Times the writer handed work back for want of citable evidence.
+    handoffs: int
+    # Which subagent ran last. The supervisor is a router, so it reads this
+    # rather than remembering anything itself.
+    last_agent: str

@@ -117,6 +117,45 @@ weak goes to `clarify` and never gets the chance to ask for one. Actions that
 follow from retrieved content work; a bare "send this email" on an off-corpus
 thread does not.
 
+## Research mode: two subagents
+
+`src/graph/subagents.py` holds two compiled graphs with their own state, invoked
+from wrapper nodes because their schemas are not the parent's.
+
+```
+load_memory ── research ──▶ researcher ──▶ «supervise» ──▶ writer ──▶ «supervise» ──▶ write_memory
+                                 ▲                             │
+                                 └──── handed back, ≤ SUPERVISOR_MAX_HANDOFFS ───┘
+```
+
+The researcher runs §13.2's loop behind its own state and mints `Evidence` ids;
+the writer composes and cites. Four rules hold this together:
+
+**The writer is compiled without a vector store.** Not told not to search —
+unable to. An agent that can both search and compose is how a system starts
+citing sources that never reached the answer.
+
+**Ids travel with the evidence.** `format_evidence` renders the researcher's ids
+and `cited_evidence` matches markers against them, so a marker that names no id
+minted this turn cites nothing. Re-deriving citations from list position is
+exactly the bug the split would otherwise introduce.
+
+**Only the writer's final message appends to `messages`.** Everything else the
+two say stays inside their own state — `messages` is checkpointed per thread and
+would replay subagent chatter into every later turn.
+
+**The supervisor is a router.** It reads `evidence`, `last_agent` and `handoffs`
+and names the next node; deciding that with a model would cost a third call per
+turn for a verdict a condition already gives. It is bound to **both** subagents,
+for the same reason one router governs the research loop.
+
+Facts split by namespace: `(user_id, "facts")` widens the researcher's first
+query, `(user_id, "preferences")` reaches only the writer. A preference about
+tone is not a retrieval hint.
+
+Tools are unreachable here — `plan` hangs off `generate`, which a research turn
+never runs.
+
 ## State contract
 
 `messages` appends through its reducer. Every other field is per-turn and

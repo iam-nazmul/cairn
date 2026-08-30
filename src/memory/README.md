@@ -25,6 +25,13 @@ thread-scoped, while a standing fact about the person is not. This matters for
 tests too — probing thread isolation with "My name is Alice" tests the wrong
 system, because a name is a durable fact and legitimately reaches other threads.
 
+The two namespaces are not decoration. `(user_id, "facts")` and
+`(user_id, "preferences")` are read separately by research mode (SPEC §13.4): a
+fact about the user's team is a retrieval hint and goes to the researcher, while
+a preference about tone or language shapes writing and goes to the writer.
+`load_user_facts` still returns both merged, which is what chat and agent modes
+use; `load_namespace` is the split.
+
 ## Backends
 
 Both factories are async context managers because the durable savers close their

@@ -12,7 +12,7 @@ must do. Module-level guidance lives in each module's `README.md`.
   message}                 │     │                                           │
                            │     ▼                                           │
                            │  load_memory ◀────────┐                         │
-                           │     │                 │                         │
+                           │     │ └─ research ─▶ researcher ⇄ writer ⇄ «sup» │
                            │     ▼                 │                         │
    VectorStore (seam) ───▶ │  retrieve ◀──┐        │                         │
                            │     │        │        │                         │
@@ -106,7 +106,16 @@ POSTGRES_TEST_URI=postgresql://cairn:cairn@localhost:5433/cairn?sslmode=disable 
   modes; a test pins that. Cap extra searches with `AGENT_MAX_SEARCHES` — each one
   is a model call.
 - `mode` goes in `context=` beside `user_id`, never in `configurable`. It is per
-  turn: one thread may mix both.
+  turn: one thread may mix all three.
+- `research` mode splits the turn between two subagents. The writer must never be
+  given a vector store: an agent that can both search and compose is how a system
+  starts citing sources that never reached the answer.
+- Evidence ids are minted by the researcher and travel with the chunk. Never
+  re-derive a citation from a position in the writer's list.
+- Only the writer's final message may append to `messages`. Subagent chatter is
+  checkpointed forever if it lands there.
+- One supervisor governs both subagents, exactly as one router governs the
+  research loop.
 
 **Tools and approval**
 - A `Tool` is `effect="write"` unless it says otherwise. Never widen that default;

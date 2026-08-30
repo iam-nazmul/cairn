@@ -5,7 +5,7 @@ SPEC §9.
 
 | Endpoint | Notes |
 |---|---|
-| `POST /chat` | One turn. Body carries `user_id`, `thread_id`, `message`, `mode`. |
+| `POST /chat` | One turn. Body carries `user_id`, `thread_id`, `message`, `mode` (`chat` \| `agent` \| `research`). |
 | `POST /chat/stream` | The same turn as SSE. See [Streaming](#streaming). |
 | `POST /threads` | Mints an id; nothing persists until the first turn. |
 | `GET /threads/{id}/history` | Straight from the checkpoint. 404 if unknown. |
@@ -252,3 +252,10 @@ handler asks the checkpoint rather than trusting the stream.
 
 The browser UI does not implement the approval prompt; `TOOLS_ENABLED` is an API
 feature for now.
+
+## Citations come from two places
+
+`chat` and `agent` cite `retrieved` by position (`cited_chunks`). `research`
+cites `evidence` by the id the researcher minted (`cited_evidence`) — the
+hand-off is the whole reason the id exists, so the API must not fall back to
+position there. `_citations` picks by which key the result carries.

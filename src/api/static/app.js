@@ -31,6 +31,7 @@ const els = {
 const MODE_HINTS = {
   chat: "One search, then an answer.",
   agent: "Searches repeatedly, refining the query, before answering.",
+  research: "A researcher gathers the evidence; a writer composes the answer.",
 };
 
 const store = {
@@ -53,7 +54,8 @@ const store = {
 const state = {
   userId: store.get("cairn.user", `u_${Math.random().toString(36).slice(2, 10)}`),
   threadId: store.get("cairn.thread", null),
-  mode: store.get("cairn.mode", "chat") === "agent" ? "agent" : "chat",
+  // Anything unrecognised falls back to chat: the API rejects an unknown mode.
+  mode: MODE_HINTS[store.get("cairn.mode", "chat")] ? store.get("cairn.mode", "chat") : "chat",
   busy: false,
 };
 
@@ -141,7 +143,7 @@ function addAssistantMessage() {
   return { answer, sources };
 }
 
-/** Agent mode only: a line showing a search it ran. */
+/** Agent and research modes: a line showing a search that was run. */
 function addSearchNote(query, sources, before) {
   els.emptyState.remove();
   const node = clone("tpl-search");

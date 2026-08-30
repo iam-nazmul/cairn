@@ -34,12 +34,18 @@ class Fact:
     namespace: str  # FACTS_NS | PREFERENCES_NS
 
 
+async def load_namespace(store: BaseStore, user_id: str, namespace: str, limit: int) -> list[str]:
+    """One namespace's facts. SPEC §13.4 splits them: preferences shape how an
+    answer is written, facts are hints for what to search for."""
+    items = await store.asearch((user_id, namespace), limit=limit)
+    return sorted(text for item in items if (text := str(item.value.get("text", ""))))
+
+
 async def load_user_facts(store: BaseStore, user_id: str, limit: int) -> list[str]:
     """Every durable fact on file for `user_id`, across both fact namespaces."""
     facts: list[str] = []
     for namespace in (FACTS_NS, PREFERENCES_NS):
-        items = await store.asearch((user_id, namespace), limit=limit)
-        facts.extend(str(item.value.get("text", "")) for item in items)
+        facts.extend(await load_namespace(store, user_id, namespace, limit))
     return sorted(f for f in facts if f)
 
 

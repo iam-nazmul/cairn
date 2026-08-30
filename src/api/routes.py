@@ -24,7 +24,7 @@ from src.memory.store import store_scope
 from src.memory.threads import forget_thread, forget_user, list_threads
 from src.observability import configure_logging
 from src.rag.llm import explain, probe, unreachable_hint
-from src.rag.prompts import cited_chunks
+from src.rag.prompts import cited_chunks, cited_evidence
 
 logger = logging.getLogger("cairn.api")
 
@@ -168,10 +168,16 @@ def _turn(body: ChatRequest) -> tuple[dict[str, Any], dict[str, Any], Context]:
 
 
 def _citations(result: dict[str, Any]) -> list[Citation]:
-    return [
-        Citation(source=chunk["source"], score=chunk["score"])
-        for chunk in cited_chunks(result.get("answer") or "", result.get("retrieved") or [])
-    ]
+    answer = result.get("answer") or ""
+    evidence = result.get("evidence") or []
+    # Research mode cites by the id the researcher minted, not by position in a
+    # list the writer never saw (SPEC §13.4).
+    cited = (
+        cited_evidence(answer, evidence)
+        if evidence
+        else cited_chunks(answer, result.get("retrieved") or [])
+    )
+    return [Citation(source=item["source"], score=item["score"]) for item in cited]
 
 
 @app.post("/chat")
@@ -335,7 +341,8 @@ async def chat_stream(request: Request, body: ChatRequest) -> StreamingResponse:
                     # Agent mode can sit through several searches before a token
                     # appears; show the work rather than an idle spinner. Chat
                     # mode's single search is implicit, so its stream is unchanged.
-                    searches = (result.get("searches") or []) if body.mode == "agent" else []
+                    multi_step = body.mode in ("agent", "research")
+                    searches = (result.get("searches") or []) if multi_step else []
                     for query in searches[reported_searches:]:
                         yield _sse(
                             {
@@ -351,7 +358,7 @@ async def chat_stream(request: Request, body: ChatRequest) -> StreamingResponse:
                 # write_memory also calls a model under MEMORY_EXTRACTION=llm.
                 # Only the two answering nodes may reach the browser.
                 node = str(metadata.get("langgraph_node", ""))
-                if node not in ("generate", "clarify"):
+                if node not in ("generate", "clarify", "compose"):
                     continue
                 text = _chunk_text(chunk)
                 if not text:

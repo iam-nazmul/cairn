@@ -98,21 +98,27 @@ Every answer has a **Copy** button, and every code block a **Copy** and a
 **Download**. Copying gives you the Markdown behind the answer rather than the
 formatted text, so it pastes into a document or an editor unchanged.
 
-### Chat or Agent
+### Chat, Agent or Research
 
-Above the message box are two modes. They change how hard cairn looks for
+Above the message box are three modes. They change how hard cairn looks for
 evidence — never how freely it answers.
 
 | | What it does | Good for |
 |---|---|---|
 | **Chat** | Searches your documents once, then answers. | Most questions. Fast, one model call. |
 | **Agent** | Searches, reads what came back, rewrites the query and searches again, then answers from everything it gathered. | Vague or many-sided questions where the right words are not in the question. |
+| **Research** | Splits the work: one part gathers the evidence, another writes the answer from it and can send it back for more. | Questions worth a careful answer, where you want the writing separated from the digging. |
 
-Agent mode shows each search as it runs, so you can see what it looked for. It
-costs an extra model call per search — `AGENT_MAX_SEARCHES` is the ceiling.
+Agent and Research show each search as it runs, so you can see what was looked
+for. Each search costs a model call — `AGENT_MAX_SEARCHES` is the ceiling, and
+in Research mode `SUPERVISOR_MAX_HANDOFFS` caps how often the writer may ask for
+more.
 
-Both modes obey the same rule: an answer with nothing to cite is not given. Agent
-mode looks harder, it does not guess more.
+In Research mode the part that writes cannot search, so it can only cite what
+was actually found for it.
+
+All three obey the same rule: an answer with nothing to cite is not given. They
+look harder, they do not guess more.
 
 The stylesheet is compiled in the browser from a CDN, so the page needs internet
 on first load even though everything else runs locally. Swapping that for a
@@ -224,6 +230,7 @@ Everything is set through environment variables, documented with defaults in
 | `ENV` | `dev` | `dev` forgets on restart; `local` and `prod` do not |
 | `MEMORY_EXTRACTION` | `rules` | `off` to stop remembering durable facts |
 | `AGENT_MAX_SEARCHES` | `3` | Searches per turn in Agent mode; `1` makes it act like Chat |
+| `SUPERVISOR_MAX_HANDOFFS` | `2` | Research mode: times the writer may ask for more evidence |
 | `TOOLS_ENABLED` | `false` | Let it act, asking first. Needs `ENV=local` or `prod` |
 | `LOG_LEVEL` | `INFO` | Per-request timings and retrieval scores |
 

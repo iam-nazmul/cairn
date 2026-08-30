@@ -4,13 +4,11 @@
 **Owner:** _Md. Nazmul Hossain_
 **Last updated:** 2026-08-27
 
-> **§13 (Agent Mode) added 2026-08-27.** §13.2 (multi-step routing) and §13.3
-> (tools and approval) are implemented, as M5 and M6. §13.4 (researcher + writer)
-> is **design only, not built** — no code in the repository implements it; its
-> open questions are closed, so it is buildable as written and carries a
-> definition of done. Fields and endpoints it introduces are marked *(M7)*
-> wherever they appear in §§4–12. Sections 1–12 keep their original numbering
-> because code comments and `CLAUDE.md` cite them by number.
+> **§13 (Agent Mode) added 2026-08-27.** All three phases are implemented:
+> §13.2 multi-step routing (M5), §13.3 tools and approval (M6), §13.4 researcher
+> + writer (M7). Each section records the amendments made at implementation time
+> and the tests that hold it. Sections 1–12 keep their original numbering because
+> code comments and `CLAUDE.md` cite them by number.
 
 ---
 
@@ -18,7 +16,7 @@
 
 Build a Retrieval-Augmented Generation (RAG) chatbot that answers questions grounded in a private knowledge base and **remembers the conversation across turns and sessions**. Memory is provided by LangGraph's persistence layer: a **checkpointer** for short-term, thread-scoped conversation state, and a **store** for long-term, cross-thread facts. The chatbot is orchestrated as a LangGraph state graph so that retrieval, generation, and memory read/write are explicit, inspectable, and resumable.
 
-The graph runs in one of two **modes**, chosen per turn (§13): `chat` retrieves once and answers; `agent` may search repeatedly, rewriting the query from what it found. The mode changes how evidence is gathered — never what may be answered without it.
+The graph runs in one of three **modes**, chosen per turn (§13): `chat` retrieves once and answers; `agent` may search repeatedly, rewriting the query from what it found; `research` splits the turn between a researcher that gathers evidence and a writer that composes from it. The mode changes how evidence is gathered — never what may be answered without it.
 
 ## 2. Goals
 
@@ -32,7 +30,7 @@ The graph runs in one of two **modes**, chosen per turn (§13): `chat` retrieves
 ## 3. Non-Goals
 
 - Model fine-tuning or training of custom LLMs.
-- ~~Multi-agent orchestration beyond a single retrieval-and-answer graph (may be a later phase).~~ — **AMENDED (§13).** The later phase is now specified. Multi-step routing (§13.2) and human-in-the-loop approval over side-effecting tools (§13.3) are built; the researcher/writer split (§13.4) is designed and scheduled as M7. Still out of scope: agents that other systems can call as services, and any topology beyond the ones §13.4 names.
+- ~~Multi-agent orchestration beyond a single retrieval-and-answer graph (may be a later phase).~~ — **AMENDED (§13), DONE.** Multi-step routing (§13.2), human-in-the-loop approval over side-effecting tools (§13.3) and the researcher/writer split (§13.4) are all built. Still out of scope: agents that other systems can call as services, and any topology beyond the researcher/writer pair — no third subagent, no agent-to-agent calls that skip the supervisor.
 - Building the ingestion/ETL pipeline for the corpus (assumed to exist or covered by a separate spec; see §11 open questions).
 - A production-grade auth system — this spec assumes an authenticated `user_id` and `thread_id` are provided by the calling layer. **This bounds §13.3:** an approval is only as trustworthy as the identity of whoever gave it, so the approver is whoever the calling layer already authenticated.
 
@@ -43,13 +41,14 @@ The graph runs in one of two **modes**, chosen per turn (§13): `chat` retrieves
 - **Checkpointer** — the storage backend that writes/reads checkpoints. Provides **short-term, thread-scoped memory**.
 - **Store** — a separate key-value/semantic store for **long-term, cross-thread memory** (survives across different `thread_id`s, typically scoped by `user_id`).
 - **RAG** — retrieve relevant chunks from a vector index, then condition generation on them.
-- **Mode** — `chat` or `agent`, chosen per turn. Travels in `context=`, not in `configurable`, because it is not a property of the thread: one conversation may mix both.
+- **Mode** — `chat`, `agent` or `research`, chosen per turn. Travels in `context=`, not in `configurable`, because it is not a property of the thread: one conversation may mix all three.
 - **Router** — a function on a conditional edge that reads state and names the next node. Routers decide; nodes do work. A router must stay free of side effects, because the same state can be routed more than once.
 - **Interrupt** — a pause raised by `interrupt()` inside a node, which suspends the run and persists it to the checkpointer. Resumed by invoking the graph again on the **same `thread_id`** with `Command(resume=...)`. See §13.3.
 - **Tool** — a named function the model may ask to run, declared in a registry with an `effect` of `read` or `write`. `write` means the effect leaves the process and needs approval; it is the default (§13.3).
 - **Approval** — a human decision on one proposed `write` tool call, identified by its `call_id` and scoped to the thread it was raised on.
 - **Subagent** — a compiled graph used as a node inside another graph. The unit of composition in §13.4.
-- **Evidence** — the deduplicated `{id, text, source, score}` set a researcher hands to a writer. The `id` is what makes a citation traceable across the handoff (§13.4). *(M7)*
+- **Evidence** — the deduplicated `{id, text, source, score}` set a researcher hands to a writer. The `id` is minted by the researcher and is what makes a citation traceable across the handoff (§13.4).
+- **Supervisor** — the router that decides which subagent runs next. It reads state; it does not call a model (§13.4).
 
 ## 5. Architecture Overview
 
@@ -116,7 +115,10 @@ class ChatState(TypedDict):
     tool_request: str                         # the raw TOOL directive generate emitted
     pending_action: dict | None               # tool call awaiting approval
     tool_calls: list[dict]                    # calls decided this turn; makes act idempotent
-    evidence: list[Evidence]                  # (M7) the researcher -> writer handoff
+    evidence: list[Evidence]                  # the researcher -> writer handoff
+    preferences: list[str]                    # the half of the facts the writer gets
+    handoffs: int                             # times the writer sent work back
+    last_agent: str                           # which subagent ran last
 ```
 
 > **Amended (M5).** `searches` and `new_hits` were added for agent mode (§13.2).
@@ -131,8 +133,12 @@ class ChatState(TypedDict):
 > `TOOL_MAX_CALLS` a per-turn budget rather than a lifetime one for the thread.
 > They live in the checkpoint, never the Store (§7).
 
-> **Planned (M7).** `evidence` does not exist yet. It is the *only* key a
-> researcher subgraph may write into parent state (§13.4).
+> **Amended (M7).** `evidence` is the only key that crosses out of the
+> researcher's own state. The other three are the parent's own bookkeeping:
+> `preferences` is loaded beside `long_term_facts` so the writer can be given the
+> half that shapes tone without the half that is a retrieval hint, and
+> `handoffs` / `last_agent` are what let the supervisor stay a router — a
+> function of state rather than something that remembers.
 
 ### 6.2 Nodes
 
@@ -143,7 +149,7 @@ class ChatState(TypedDict):
 5. **`research`** *(agent mode only, M5)* — ask the model for a better query given what is still missing, search again, and merge the results into `retrieved`. Never reached in chat mode. See §13.2.
 6. **`clarify`** *(M1)* — the no-answer path: say what could not be found instead of answering from priors.
 7. **`plan` / `approve` / `act`** *(M6)* — propose a tool call, suspend for a human decision on a `write` effect, then perform it exactly once. `act` merges the result into `retrieved` and hands the turn back to `generate`. §13.3.
-8. **`researcher` / `writer`** *(M7, not built)* — compiled subgraphs used as nodes, sequenced by a supervisor router. §13.4.
+8. **`researcher` / `writer`** *(M7)* — compiled subgraphs (`src/graph/subagents.py`) invoked from wrapper nodes, sequenced by the supervisor router. The researcher searches and mints evidence ids; the writer composes and cites, with no vector store to search. §13.4.
 
 ### 6.3 Edges
 
@@ -153,6 +159,8 @@ class ChatState(TypedDict):
 
 - after `retrieve` **and** after `research` — the same router on both, deciding `generate` / `clarify` / `research` (§13.2);
 - after `generate` — an answer that cites nothing falls through to `clarify` rather than shipping as grounded.
+
+**Also DONE (M7).** A third conditional edge leaves `load_memory`: `route_by_mode` sends a `research` turn to the `researcher` subagent instead of `retrieve`, and the supervisor — one router bound to **both** subagents, for the same reason one router governs the research loop — decides `writer` / `researcher` / `clarify` / `write_memory` from there.
 
 **DONE (M6).** The second of these gained a `plan` destination rather than a third router being added, and two routers now govern the tool path: `route_after_plan` (`approve` for a `write` effect, `act` for a `read` one, `clarify` for a call the registry does not have) and `route_after_approval` (`act` when the human approved, `clarify` when they did not). `act → generate` closes the loop, bounded by `TOOL_MAX_CALLS`.
 
@@ -227,7 +235,7 @@ Request:
 { "user_id": "u_123", "thread_id": "t_abc", "message": "...", "mode": "chat" }
 ```
 
-`mode` is `"chat"` (default) or `"agent"` — and `"research"` once §13.4 is built. It MUST default to `chat`, so callers written before §13 keep their behaviour, and an unrecognised value MUST be rejected rather than silently treated as `chat`. That rejection is what lets §13.4 add a third mode without breaking older clients.
+`mode` is `"chat"` (default), `"agent"` or `"research"`. It MUST default to `chat`, so callers written before §13 keep their behaviour, and an unrecognised value MUST be rejected rather than silently treated as `chat` — a 422, which is what let §13.4 add a third mode without breaking older clients.
 
 Response:
 ```json
@@ -292,7 +300,7 @@ Supporting endpoints:
 4. **M4 — Production hardening:** Postgres checkpointer + store, observability, context trimming/summarization, deletion APIs, evals.
 5. **M5 — Agent mode (multi-step routing):** ✅ **done.** `chat` / `agent` modes, the `research` node, one router governing the loop, search budget, streamed search events, browser UI. §13.2.
 6. **M6 — Tools and human-in-the-loop:** ✅ **done.** Tool registry with effect classes, `plan` / `approve` / `act`, `interrupt()`-based approval, per-turn tool budget, pending/resume endpoints, `interrupt` stream event. §13.3.
-7. **M7 — Researcher + writer (multi-agent):** split retrieval from composition into two subagents under a supervisor. §13.4. **Depends on M6** — a researcher that can act needs the approval gate first.
+7. **M7 — Researcher + writer (multi-agent):** ✅ **done.** `research` mode, the researcher and writer subgraphs, the supervisor router, evidence ids that survive the hand-off, the hand-off ceiling, and a third button in the UI. §13.4.
 ---
 
 ## 13. Agent Mode
@@ -314,6 +322,7 @@ extend that test rather than exempt itself from it.
 |---|---|---|
 | `chat` | Retrieve once, then answer. | 1 model call |
 | `agent` | Retrieve, judge, optionally rewrite the query and search again, then answer from everything gathered. | 1 + N model calls, N ≤ `AGENT_MAX_SEARCHES` − 1 |
+| `research` | A researcher gathers and judges sufficiency; a writer composes from the evidence and may hand the work back. | 1 + N + H, H ≤ `SUPERVISOR_MAX_HANDOFFS` |
 
 Mode is chosen **per turn**, not per thread. A conversation may mix both, and the
 checkpoint records which mode produced each answer. It travels in `context=`
@@ -563,13 +572,13 @@ cites nothing still routes to `clarify`.
 - **No browser UI.** The approval prompt is an API-level feature in M6; the UI
   ships `chat` and `agent` only.
 
-### 13.4 Researcher + writer — *designed, NOT built (M7)*
+### 13.4 Researcher + writer — *implemented (M7)*
 
-> **Nothing in the repository implements this.** Scheduled after M6 because a
-> researcher that can act needs the approval gate to exist first.
+> **Built as designed**, with the amendments recorded at the end of this section.
+> It is a third mode rather than a replacement: `chat` and `agent` are untouched.
 
-**Shape.** Two subagents — compiled graphs used as nodes — plus a supervisor
-that decides which runs next and when the work is done.
+**Shape.** Two subagents — compiled graphs invoked from wrapper nodes — plus a
+supervisor that decides which runs next and when the work is done.
 
 ```
         ┌── supervisor ──┐
@@ -585,9 +594,11 @@ researcher return evidence, did the writer hand work back, is the handoff budget
 spent — and names the next subagent. This resolves the first open question in
 favour of the cheap deterministic option: a model call to decide "the researcher
 returned nothing, ask again" buys nothing a condition on state cannot decide, and
-it costs a third call on every turn. A model-driven supervisor stays available
-behind `SUPERVISOR_MODEL=1` for the case the evals actually show: a writer that
-sends work back with a reason the router cannot interpret.
+it costs a third call on every turn.
+
+The same supervisor is bound to **both** subagents, for the reason §13.2 binds
+one router to `retrieve` and `research`: a second one would be free to drift, and
+what it would drift on is when the evidence is good enough.
 
 **Division of labour.** The researcher owns retrieval and decides when the
 evidence is sufficient — essentially §13.2's loop, extracted. The writer owns
@@ -616,9 +627,10 @@ every later turn. **Only the writer's final message appends to `messages`.**
 `generate` was handed. With two, the writer cites evidence the researcher chose,
 and the mapping must survive the handoff intact — which is why the id lives on
 `Evidence` rather than being re-derived from list position on the far side. The
-existing citation eval (§11) MUST be extended to assert that every `[S<n>]` the
-writer emits resolves to an `Evidence.id` the researcher produced **in that
-turn**, not merely that a marker exists.
+writer's context is rendered from those ids (`format_evidence`), and
+`cited_evidence` matches an answer's markers against them, so a marker that
+matches no id the researcher minted this turn cites nothing however plausible it
+looks. `tests/test_multi_agent.py` holds it.
 
 **Long-term facts split by namespace.** §7.2 already separates them, and the
 split matches the division of labour: `(user_id, "preferences")` — tone,
@@ -636,16 +648,45 @@ mode is rejected already protects older clients.
 against agent mode's two and chat's one — and up to
 `AGENT_MAX_SEARCHES + SUPERVISOR_MAX_HANDOFFS + 1`. `AGENT_MAX_SEARCHES` bounds
 the researcher; `SUPERVISOR_MAX_HANDOFFS` (default `2`) bounds the ping-pong,
-because two agents with no ceiling can pass work back and forth indefinitely.
+because two agents with no ceiling can pass work back and forth indefinitely. The
+ceiling counts writer attempts: it tries, hands back, is sent out once more, and
+the second failure ends the turn on the no-answer path.
 
-#### Definition of done (M7)
+#### Definition of done (M7) — met
 
-Tests asserting: every citation the writer emits maps to evidence the researcher
-returned this turn; the writer has no path to the vector store (its subgraph is
-compiled without one); `messages` after a `research` turn contains exactly one
-new assistant message; `SUPERVISOR_MAX_HANDOFFS` terminates a researcher/writer
-loop that refuses to converge; and the §13 grounding parity test extended to the
-third mode.
+`tests/test_multi_agent.py` asserts: every citation the writer emits maps to
+evidence the researcher returned this turn; the writer has no path to the vector
+store (`build_writer` takes none, and every query the corpus sees is one the
+researcher logged); `messages` after a `research` turn contains exactly one new
+assistant message; `SUPERVISOR_MAX_HANDOFFS` terminates a writer that refuses to
+cite; the grounding floor sends all three modes to `clarify` at the same value,
+through whichever decider each one routes through; and `/chat` and `/chat/stream`
+return the same answer and citations in the third mode too.
+
+#### Amended at implementation time (M7)
+
+- **`SUPERVISOR_MODEL` was not built.** The design left a model-driven supervisor
+  available behind a flag; nothing in the evals asks for one, and a setting that
+  exists but is never exercised is a claim the code does not keep. The router is
+  the whole supervisor. Add the flag when a writer actually hands back a reason a
+  condition cannot read.
+- **The writer also receives the conversation and the user's preferences.** What
+  it never receives is the researcher's queries, the chunks it rejected, or any
+  way to search — which is what the state boundary was protecting.
+- **Evidence is the accepted set, and it is where a second pass resumes.** Chunks
+  below `RETRIEVAL_MIN_SCORE` never leave the researcher's own state, so a
+  hand-back re-enters with the evidence so far rather than starting over.
+- **Facts split by namespace, as designed.** `(user_id, "facts")` widens the
+  researcher's first query; `(user_id, "preferences")` reaches only the writer.
+  A preference about tone is not a retrieval hint, and a fact about the user's
+  team is not a style instruction.
+- **`route_by_mode` branches at `load_memory`, not at `retrieve`.** A research
+  turn never enters the single-retrieval path at all, which is what keeps the
+  §13.2 tests meaningful for `agent`.
+- **Tools are not reachable in research mode.** `plan` hangs off `generate`,
+  which a research turn does not run. Composing an answer and taking an action
+  are different jobs; wiring the writer to tools would give the agent that cannot
+  search the ability to act.
 
 ### 13.5 What every phase must preserve
 
@@ -656,3 +697,5 @@ third mode.
 | An uncited answer routes to `clarify` | `route_after_generate`, unchanged by M6/M7 |
 | Durable facts never enter `messages`; conversation never enters the Store | §7, `USER_NAMESPACES` (`src/memory/threads.py`) |
 | Effects happen after approval, exactly once | §13.3 constraints 1–2 |
+| A citation names evidence that was actually gathered this turn | `cited_chunks` / `cited_evidence`, per mode |
+| Every loop has a ceiling | `AGENT_MAX_SEARCHES`, `TOOL_MAX_CALLS`, `SUPERVISOR_MAX_HANDOFFS` |

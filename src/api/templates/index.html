@@ -171,7 +171,7 @@
     <div class="border-t border-stone-200 bg-white px-4 py-4 md:px-8 dark:border-stone-800
                 dark:bg-stone-900">
       <!-- Segmented control. `mode` rides on each request, so one conversation
-           can mix both and the checkpoint records which produced each turn. -->
+           can mix all three and the checkpoint records which produced each turn. -->
       <div
         id="mode"
         role="radiogroup"
@@ -201,6 +201,16 @@
                    dark:aria-checked:text-cairn-300 dark:hover:text-stone-300"
           >
             Agent
+          </button>
+          <button
+            data-mode="research"
+            role="radio"
+            class="rounded-md px-2.5 py-1 text-xs font-medium text-stone-500
+                   aria-checked:bg-white aria-checked:text-cairn-700 aria-checked:shadow-xs
+                   hover:text-stone-700 dark:aria-checked:bg-stone-800
+                   dark:aria-checked:text-cairn-300 dark:hover:text-stone-300"
+          >
+            Research
           </button>
         </div>
         <p id="mode-hint" class="truncate text-xs text-stone-400 dark:text-stone-500"></p>

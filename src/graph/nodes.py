@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from datetime import UTC, datetime
 from typing import Any, Protocol
 
-from langchain.messages import HumanMessage, SystemMessage
+from langchain.messages import AIMessage, HumanMessage, SystemMessage
 from langgraph.config import get_config
 from langgraph.runtime import Runtime
 from langgraph.types import interrupt
@@ -16,7 +16,9 @@ from src.config import Context, Settings
 from src.graph.state import ChatState, RetrievedChunk
 from src.memory.facts import (
     LLM_EXTRACTION_PROMPT,
+    PREFERENCES_NS,
     extract_facts,
+    load_namespace,
     load_user_facts,
     parse_llm_facts,
 )
@@ -31,7 +33,7 @@ from src.rag.prompts import (
     parse_refined_query,
     parse_tool_request,
 )
-from src.rag.retrieve import VectorStore, augment_query_with_history
+from src.rag.retrieve import VectorStore, augment_query_with_history, merge_chunks
 from src.tools.registry import Tool, ToolRegistry
 
 
@@ -49,7 +51,7 @@ def make_load_memory(settings: Settings) -> Node:
     async def load_memory(state: ChatState, *, runtime: Runtime[Context]) -> dict[str, Any]:
         store = runtime.store
         if store is None:
-            return {"long_term_facts": [], **_reset_retrieval()}
+            return {"long_term_facts": [], "preferences": [], **_reset_retrieval()}
 
         # Registered here, not in write_memory: a turn that pauses for approval
         # (SPEC §13.3) must be owned before anyone can resume it, and a turn that
@@ -58,8 +60,12 @@ def make_load_memory(settings: Settings) -> Node:
         if thread_id:
             await register_thread(store, runtime.context.user_id, str(thread_id))
 
-        facts = await load_user_facts(store, runtime.context.user_id, settings.max_long_term_facts)
-        return {"long_term_facts": facts, **_reset_retrieval()}
+        user_id = runtime.context.user_id
+        facts = await load_user_facts(store, user_id, settings.max_long_term_facts)
+        preferences = await load_namespace(
+            store, user_id, PREFERENCES_NS, settings.max_long_term_facts
+        )
+        return {"long_term_facts": facts, "preferences": preferences, **_reset_retrieval()}
 
     return load_memory
 
@@ -78,30 +84,10 @@ def _reset_retrieval() -> dict[str, Any]:
         "tool_request": "",
         "pending_action": None,
         "tool_calls": [],
+        "evidence": [],
+        "handoffs": 0,
+        "last_agent": "",
     }
-
-
-def _merge_chunks(
-    existing: list[RetrievedChunk], found: list[RetrievedChunk]
-) -> tuple[list[RetrievedChunk], int]:
-    """Combine searches, best score per source wins. Returns the new-source count.
-
-    Deduplicating by source matters for citations: the same document arriving
-    from two queries must stay one [S] block, or the answer cites two numbers for
-    one source.
-    """
-    by_source = {chunk["source"]: chunk for chunk in existing}
-    new_sources = 0
-    for chunk in found:
-        current = by_source.get(chunk["source"])
-        if current is None:
-            new_sources += 1
-            by_source[chunk["source"]] = chunk
-        elif chunk["score"] > current["score"]:
-            by_source[chunk["source"]] = chunk
-
-    merged = sorted(by_source.values(), key=lambda c: (-c["score"], c["source"]))
-    return merged, new_sources
 
 
 def make_write_memory(settings: Settings, chat_model: ChatModel) -> Node:
@@ -180,7 +166,7 @@ def make_research(vector_store: VectorStore, chat_model: ChatModel, settings: Se
         query = parse_refined_query(text, state["question"], tried)
 
         chunks = await vector_store.search(query, top_k=settings.retrieval_top_k)
-        merged, new_sources = _merge_chunks(found, chunks)
+        merged, new_sources = merge_chunks(found, chunks)
 
         return {"retrieved": merged, "searches": [*tried, query], "new_hits": new_sources}
 
@@ -346,7 +332,7 @@ def make_act(tools: ToolRegistry) -> Node:
         result = await tool.run(**pending["args"])
         # Tool output is evidence like any other, so the citation gate applies to
         # it unchanged (SPEC §13.3). A second grounding path would be free to drift.
-        merged, _ = _merge_chunks(
+        merged, _ = merge_chunks(
             list(state.get("retrieved") or []),
             [RetrievedChunk(text=result, source=f"tool://{tool.name}/{call_id}", score=1.0)],
         )
@@ -376,6 +362,28 @@ def route_after_approval(state: ChatState) -> str:
     return "act" if state.get("pending_action") else "clarify"
 
 
+def grounded_enough(scored: Iterable[Mapping[str, Any]], min_score: float) -> bool:
+    """The grounding floor, in one place. Every mode asks this same question --
+    a second copy is a second thing to drift (SPEC §13.5)."""
+    best = max((float(item["score"]) for item in scored), default=0.0)
+    return best >= min_score and best > 0.0
+
+
+def keep_searching(
+    chunks: list[RetrievedChunk], searches: list[str], new_hits: int, settings: Settings
+) -> bool:
+    """Is another search worth its model call? Shared by agent mode's router and
+    the researcher subagent, so the budget cannot mean two different things."""
+    best = max((c["score"] for c in chunks), default=0.0)
+    if best >= settings.agent_good_score:
+        return False  # already good enough; another rewrite re-finds it
+    if len(searches) >= settings.agent_max_searches:
+        return False  # budget spent
+    # A rewrite that surfaced nothing new means further ones are paying a model
+    # call to re-find what is already here.
+    return not (len(searches) > 1 and not new_hits)
+
+
 def make_route_after_retrieve(
     settings: Settings,
 ) -> Callable[[ChatState, Runtime[Context]], str]:
@@ -387,28 +395,107 @@ def make_route_after_retrieve(
     """
 
     def answer_or_clarify(chunks: list[RetrievedChunk]) -> str:
-        if not chunks:
-            return "clarify"
-        if max(c["score"] for c in chunks) < settings.retrieval_min_score:
-            return "clarify"
-        return "generate"
+        return "generate" if grounded_enough(chunks, settings.retrieval_min_score) else "clarify"
 
     def route_after_retrieve(state: ChatState, runtime: Runtime[Context]) -> str:
         chunks = list(state.get("retrieved") or [])
         if runtime.context.mode != "agent":
             return answer_or_clarify(chunks)
 
-        best = max((c["score"] for c in chunks), default=0.0)
-        searched = len(state.get("searches") or [])
-
-        if best >= settings.agent_good_score:
-            return answer_or_clarify(chunks)  # already good enough
-        if searched >= settings.agent_max_searches:
-            return answer_or_clarify(chunks)  # budget spent
-        if searched > 1 and not state.get("new_hits"):
-            # The last rewrite surfaced nothing new, so further ones are paying a
-            # model call to re-find what is already here.
-            return answer_or_clarify(chunks)
-        return "research"
+        if keep_searching(
+            chunks, list(state.get("searches") or []), state.get("new_hits", 0), settings
+        ):
+            return "research"
+        return answer_or_clarify(chunks)
 
     return route_after_retrieve
+
+
+def make_researcher(researcher: Any) -> Node:
+    """Run the researcher subagent. Only the evidence and the search log cross
+    back: chunks it looked at and rejected are its own business (SPEC §13.4)."""
+
+    async def researcher_node(state: ChatState, *, runtime: Runtime[Context]) -> dict[str, Any]:
+        facts = list(state.get("long_term_facts") or [])
+        preferences = set(state.get("preferences") or [])
+        result = await researcher.ainvoke(
+            {
+                "question": state["question"],
+                # Facts are retrieval hints; preferences are the writer's business.
+                "hints": [f for f in facts if f not in preferences],
+                "searches": list(state.get("searches") or []),
+                # Evidence it already produced is where a second pass resumes.
+                "retrieved": [
+                    RetrievedChunk(text=e["text"], source=e["source"], score=e["score"])
+                    for e in state.get("evidence") or []
+                ],
+                "new_hits": 0,
+                "evidence": [],
+            }
+        )
+        return {
+            "evidence": result["evidence"],
+            "searches": result["searches"],
+            "new_hits": result["new_hits"],
+            "last_agent": "researcher",
+        }
+
+    return researcher_node
+
+
+def make_writer(writer: Any) -> Node:
+    """Run the writer subagent. It sees the evidence, the user's preferences and
+    the conversation -- never the query, the corpus, or a way to reach either."""
+
+    async def writer_node(state: ChatState, *, runtime: Runtime[Context]) -> dict[str, Any]:
+        result = await writer.ainvoke(
+            {
+                "question": state["question"],
+                "evidence": list(state.get("evidence") or []),
+                "preferences": list(state.get("preferences") or []),
+                "messages": list(state.get("messages") or []),
+                "answer": "",
+            }
+        )
+        answer = str(result.get("answer") or "")
+        if not answer:
+            # Could not cite what it was given: hand the work back rather than
+            # ship an answer nobody can trace.
+            return {"handoffs": state.get("handoffs", 0) + 1, "last_agent": "writer"}
+
+        # ONLY the writer's final message reaches `messages`. Neither subagent's
+        # internal chatter may be checkpointed into every later turn.
+        return {"answer": answer, "messages": [AIMessage(content=answer)], "last_agent": "writer"}
+
+    return writer_node
+
+
+def make_supervise(settings: Settings) -> Callable[[ChatState, Runtime[Context]], str]:
+    """Who runs next, decided from state alone.
+
+    A router, not a model call: "the researcher came back empty, send it out
+    again" is a condition, and paying a third model call per turn to phrase it
+    would buy nothing (SPEC §13.4).
+    """
+
+    def supervise(state: ChatState, runtime: Runtime[Context]) -> str:
+        if state.get("answer"):
+            return "write_memory"
+
+        evidence = list(state.get("evidence") or [])
+        if not grounded_enough(evidence, settings.retrieval_min_score):
+            # Same floor as every other mode. Searching differently never lowers it.
+            return "clarify"
+        if state.get("last_agent") != "writer":
+            return "writer"
+        # The writer handed it back. Gather more -- but not forever.
+        if state.get("handoffs", 0) >= settings.supervisor_max_handoffs:
+            return "clarify"
+        return "researcher"
+
+    return supervise
+
+
+def route_by_mode(state: ChatState, runtime: Runtime[Context]) -> str:
+    """`research` mode gathers with a subagent instead of retrieving inline."""
+    return "researcher" if runtime.context.mode == "research" else "retrieve"

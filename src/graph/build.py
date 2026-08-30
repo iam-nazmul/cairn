@@ -19,14 +19,19 @@ from src.graph.nodes import (
     make_load_memory,
     make_plan,
     make_research,
+    make_researcher,
     make_retrieve,
     make_route_after_retrieve,
+    make_supervise,
     make_write_memory,
+    make_writer,
     route_after_approval,
     route_after_generate,
     route_after_plan,
+    route_by_mode,
 )
 from src.graph.state import ChatState
+from src.graph.subagents import build_researcher, build_writer
 from src.observability import instrument
 from src.rag.llm import ChatModel, get_chat_model
 from src.rag.retrieve import VectorStore, get_vector_store
@@ -61,13 +66,26 @@ def build_graph(
     builder.add_node("plan", instrument("plan", make_plan(tools, settings)))
     builder.add_node("approve", instrument("approve", approve))
     builder.add_node("act", instrument("act", make_act(tools)))
+    # Research mode (SPEC §13.4): two subagents behind their own state, wrapped
+    # as nodes because their schemas are not the parent's.
+    builder.add_node(
+        "researcher",
+        instrument(
+            "researcher", make_researcher(build_researcher(vector_store, chat_model, settings))
+        ),
+    )
+    builder.add_node(
+        "writer", instrument("writer", make_writer(build_writer(chat_model, settings)))
+    )
     builder.add_node("clarify", instrument("clarify", make_clarify(chat_model, settings)))
     builder.add_node(
         "write_memory", instrument("write_memory", make_write_memory(settings, chat_model))
     )
 
     builder.add_edge(START, "load_memory")
-    builder.add_edge("load_memory", "retrieve")
+    builder.add_conditional_edges(
+        "load_memory", route_by_mode, {"retrieve": "retrieve", "researcher": "researcher"}
+    )
     # One router on both nodes: `research` loops back through the same decision,
     # so the budget and the grounding verdict cannot drift apart.
     route_after_retrieve = make_route_after_retrieve(settings)
@@ -96,6 +114,17 @@ def build_graph(
         "approve", route_after_approval, {"act": "act", "clarify": "clarify"}
     )
     builder.add_edge("act", "generate")
+    # One supervisor on both subagents, for the same reason one router governs
+    # the research loop: two would be free to disagree about when to stop.
+    supervise = make_supervise(settings)
+    handoffs: dict[Hashable, str] = {
+        "researcher": "researcher",
+        "writer": "writer",
+        "clarify": "clarify",
+        "write_memory": "write_memory",
+    }
+    builder.add_conditional_edges("researcher", supervise, handoffs)
+    builder.add_conditional_edges("writer", supervise, handoffs)
     builder.add_edge("clarify", "write_memory")
     builder.add_edge("write_memory", END)
 
