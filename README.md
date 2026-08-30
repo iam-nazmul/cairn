@@ -155,7 +155,40 @@ not drawn from your documents.
 | `GET /users/{user_id}/facts` | What is remembered about a user |
 | `DELETE /users/{user_id}/threads/{id}` | Erase one conversation, keeping remembered facts |
 | `DELETE /users/{user_id}` | Erase a user: every conversation and every remembered fact |
+| `GET /threads/{id}/pending` | The action a conversation is waiting for you to approve |
+| `POST /threads/{id}/resume` | Approve or decline it |
 | `GET /health` | Check it is running |
+
+## Asking before it acts
+
+Switched off unless you set `TOOLS_ENABLED=true`. With it on, the assistant can
+do things as well as answer — and anything that leaves the process, such as
+sending an email, stops and waits for you first.
+
+The turn comes back with no answer and a description of what it wants to do:
+
+```json
+{ "status": "awaiting_approval", "answer": "",
+  "pending": { "call_id": "c_7f", "tool": "send_email",
+               "args": { "to": "alice@example.com", "subject": "Deadline", "body": "..." },
+               "editable": ["body", "subject"] } }
+```
+
+Nothing has happened at this point. It happens when you say so:
+
+```bash
+curl -s localhost:8000/threads/$THREAD/resume -H 'content-type: application/json' -d '{
+  "user_id": "u_123", "call_id": "c_7f", "decision": "approve",
+  "edits": { "subject": "Expense deadline" }
+}' | jq
+```
+
+You can edit the fields listed in `editable` while approving — never the
+recipient, which is the difference between approving an action and authorising a
+different one. Declining performs nothing and tells you so. The request is parked
+on the conversation, so it survives a restart, and only the user who owns the
+conversation can decide it. This is API-only for now; the browser UI does not
+show the prompt.
 
 ## What it remembers
 
@@ -191,10 +224,12 @@ Everything is set through environment variables, documented with defaults in
 | `ENV` | `dev` | `dev` forgets on restart; `local` and `prod` do not |
 | `MEMORY_EXTRACTION` | `rules` | `off` to stop remembering durable facts |
 | `AGENT_MAX_SEARCHES` | `3` | Searches per turn in Agent mode; `1` makes it act like Chat |
+| `TOOLS_ENABLED` | `false` | Let it act, asking first. Needs `ENV=local` or `prod` |
 | `LOG_LEVEL` | `INFO` | Per-request timings and retrieval scores |
 
 ## For developers
 
 [SPEC.md](SPEC.md) is the design, [CLAUDE.md](CLAUDE.md) the working rules, and
 each module has its own guide: [graph](src/graph/README.md),
-[memory](src/memory/README.md), [rag](src/rag/README.md), [api](src/api/README.md).
+[memory](src/memory/README.md), [rag](src/rag/README.md), [api](src/api/README.md),
+[tools](src/tools/README.md).

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Annotated, TypedDict
+from typing import Annotated, Any, TypedDict
 
 from langchain.messages import AnyMessage
 from langgraph.graph.message import add_messages
@@ -30,3 +30,13 @@ class ChatState(TypedDict):
     # Sources the most recent search added that earlier ones had not. Zero means
     # refining stopped paying for itself, which is a reason to stop.
     new_hits: int
+
+    # Tools (SPEC §13.3). The raw `TOOL ...` directive `generate` emitted, which
+    # `plan` -- the only node that may propose an effect -- resolves and validates.
+    tool_request: str
+    # The resolved call awaiting a decision, or None. Thread-scoped: it lives in
+    # the checkpoint, never the Store.
+    pending_action: dict[str, Any] | None
+    # Every call decided this thread, done or rejected. `act` reads it to refuse
+    # a second send of a call_id it has already performed.
+    tool_calls: list[dict[str, Any]]

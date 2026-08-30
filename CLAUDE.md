@@ -21,7 +21,9 @@ must do. Module-level guidance lives in each module's `README.md`.
                            │     │ └─ empty/weak ──┼──────┐                  │
                            │     ▼                 │      ▼                  │
    ChatModel (seam) ─────▶ │  generate             │   clarify               │
-                           │     │ └─ uncited ─────┼──────┘  │               │
+                           │     │ ├─ uncited ─────┼──────┘  │               │
+                           │     │ └─ TOOL ──▶ plan ──▶ approve (interrupt)  │
+   ToolRegistry (seam) ──▶ │     │              └──▶ act ──▶ generate        │
                            │     ▼                 │         │               │
                            │  write_memory ────────┘◀────────┘               │
                            │     │                                           │
@@ -106,6 +108,17 @@ POSTGRES_TEST_URI=postgresql://cairn:cairn@localhost:5433/cairn?sslmode=disable 
 - `mode` goes in `context=` beside `user_id`, never in `configurable`. It is per
   turn: one thread may mix both.
 
+**Tools and approval**
+- A `Tool` is `effect="write"` unless it says otherwise. Never widen that default;
+  never add a tool without a test that it does not run before a resume.
+- Nothing observable may happen before `interrupt()` in a node — a resume re-runs
+  the node from its first line. Effects belong in `act`, which has no `interrupt()`.
+- `act` must stay idempotent per `call_id`. A double-clicked approval sends once.
+- Tool output enters `retrieved` as a `tool://` chunk so the existing citation
+  gate covers it. Do not add a second grounding path.
+- `TOOLS_ENABLED` requires `ENV=local` or `ENV=prod`; `Settings` refuses `dev`.
+- Resuming must verify the `user_id` owns the thread, exactly as deletion does.
+
 **Dependencies**
 - Do not bump `langgraph` or any `langgraph-checkpoint-*` package without
   re-running `tests/test_memory.py` against SQLite **and** Postgres. The
@@ -126,6 +139,7 @@ POSTGRES_TEST_URI=postgresql://cairn:cairn@localhost:5433/cairn?sslmode=disable 
 | `src/memory/` | Checkpointer, Store, facts, deletion | [src/memory/README.md](src/memory/README.md) |
 | `src/rag/` | Retrieval, prompts, LLM seam | [src/rag/README.md](src/rag/README.md) |
 | `src/api/` | HTTP layer, streaming, browser UI | [src/api/README.md](src/api/README.md) |
+| `src/tools/` | Tool registry, effect classes, transports | [src/tools/README.md](src/tools/README.md) |
 | `.claude/references/` | Verified LangGraph API, memory placement | — |
 
 ## Gotchas

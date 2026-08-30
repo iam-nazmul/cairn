@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import json
 import re
-from typing import cast
+from collections.abc import Iterable
+from typing import Any, cast
 
 from langchain.messages import AnyMessage, HumanMessage, SystemMessage
 from langchain_core.messages.utils import count_tokens_approximately, trim_messages
 
 from src.graph.state import ChatState, RetrievedChunk
+from src.tools.registry import Tool
 
 CITATION_RE = re.compile(r"\[S(\d+)\]")
 
@@ -40,6 +43,28 @@ missing -- different wording, a narrower aspect, or a term the documents would \
 use rather than the user's phrasing.
 
 Output the query alone: no quotes, no explanation, no prefix."""
+
+TOOLS_SYSTEM = """You can also perform actions by calling a tool.
+
+To call one, reply with a single line and nothing else:
+
+TOOL <name> {{"arg": "value"}}
+
+The arguments must be one JSON object. Do not explain the call, do not answer in \
+the same reply, and never claim an action is done unless a tool:// block below \
+shows it already ran -- such a block means that call has happened, so answer \
+from it instead of requesting it again.
+
+Available tools:
+{tools}"""
+
+DECLINED_TEMPLATE = (
+    "The user was asked to approve {preview} and declined it, so the action did "
+    "NOT happen. Say plainly what was not done. Do not offer to do it anyway."
+)
+
+# `TOOL <name> {json}` -- the whole reply, because a directive is not an answer.
+TOOL_RE = re.compile(r"\ATOOL\s+([A-Za-z_][A-Za-z0-9_]*)\s+(\{.*\})\s*\Z", re.S)
 
 _MAX_QUERY_CHARS = 200
 
@@ -92,17 +117,47 @@ def format_context(chunks: list[RetrievedChunk], max_chars: int) -> str:
     return "Retrieved context:\n" + "\n\n".join(blocks)
 
 
+def format_tools(tools: Iterable[Tool]) -> str:
+    return "\n".join(f"- {t.signature()}: {t.description}" for t in tools)
+
+
+def parse_tool_request(reply: str) -> tuple[str, dict[str, Any]] | None:
+    """Read a `TOOL name {json}` directive, or None if the reply is an answer.
+
+    Strict on purpose: the directive must be the entire reply, so an answer that
+    merely mentions a tool cannot be mistaken for a request to run one.
+    """
+    match = TOOL_RE.match(reply.strip())
+    if match is None:
+        return None
+    try:
+        args = json.loads(match.group(2))
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(args, dict) or any(not isinstance(k, str) for k in args):
+        return None
+    return match.group(1), cast(dict[str, Any], args)
+
+
 def build_system_prompt(
     *,
     chunks: list[RetrievedChunk],
     facts: list[str],
     max_chars: int,
     grounded: bool = True,
+    tools: Iterable[Tool] = (),
+    declined: str = "",
 ) -> str:
     header = GROUNDED_SYSTEM if grounded else CLARIFY_SYSTEM
     parts = [header, format_facts(facts)]
     if grounded:
         parts.append(format_context(chunks, max_chars))
+    offered = list(tools)
+    if offered:
+        parts.append(TOOLS_SYSTEM.format(tools=format_tools(offered)))
+    if declined:
+        # The model cannot know a human said no; it is not in the transcript.
+        parts.append(DECLINED_TEMPLATE.format(preview=declined))
     return "\n\n".join(parts)
 
 

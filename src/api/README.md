@@ -13,6 +13,8 @@ SPEC §9.
 | `GET /users/{user_id}/facts` | What the Store holds on the user. |
 | `DELETE /users/{user_id}/threads/{id}` | One conversation. Durable facts kept. |
 | `DELETE /users/{user_id}` | Both memory systems. Idempotent. |
+| `GET /threads/{id}/pending?user_id=` | The approval this thread is parked on, or 404. |
+| `POST /threads/{id}/resume` | Decide it and finish the turn. See [Approval](#approval). |
 | `GET /health` | Liveness, backend, provider, provider reachability. |
 | `GET /` | The browser UI. See [The UI](#the-ui). |
 
@@ -221,3 +223,32 @@ text over the authoritative answer.
 `TestClient` as a context manager runs the lifespan handler. Tests monkeypatch
 `routes.get_settings` to point at a temp SQLite file, so they exercise a real
 durable backend without touching a developer's database.
+
+## Approval
+
+A turn can end without an answer: `status: "awaiting_approval"` and a `pending`
+payload naming the call. Nothing was done — the run is parked on a checkpoint
+until `POST /threads/{id}/resume` decides it.
+
+```json
+{ "user_id": "u_123", "call_id": "c_7f", "decision": "approve",
+  "edits": {"subject": "Rewritten"} }
+```
+
+The status codes carry the failure modes: **403** the thread is not this user's,
+**404** nothing is pending, **409** the pending call is a different `call_id` —
+the approver is acting on a screen that has moved on — **410** the approval aged
+past `APPROVAL_TTL_SECONDS`, in which case it is resumed **as a rejection** so
+the checkpoint is not left parked forever.
+
+403 is leak-free here: the check is "is this thread in *your* index", so the
+answer is identical for a thread that does not exist and one belonging to
+somebody else.
+
+On the stream the turn ends with an `interrupt` event instead of `final`,
+preceded by `restart` if anything was drawn — the directive streams like an
+answer and is not one. An interrupt does not surface as a stream part, so the
+handler asks the checkpoint rather than trusting the stream.
+
+The browser UI does not implement the approval prompt; `TOOLS_ENABLED` is an API
+feature for now.

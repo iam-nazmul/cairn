@@ -6,7 +6,7 @@ For developers and agents changing the graph. Rules that apply everywhere are in
 | File | Contents |
 |---|---|
 | `state.py` | `ChatState`, `RetrievedChunk`, the `add_messages` reducer |
-| `nodes.py` | Node factories and the two routers |
+| `nodes.py` | Node factories and the routers |
 | `build.py` | `StateGraph` wiring, instrumentation, `compile()` |
 
 ## Adding a node
@@ -77,6 +77,45 @@ cites two numbers for one source.
 but the checkpoint holds last turn's values, so agent mode would otherwise merge
 into chunks found for a different question. It runs first on every turn, which is
 why the reset lives there rather than in the request the API builds.
+
+## Tools and approval
+
+Off unless `TOOLS_ENABLED=1`, and refused outright under `ENV=dev` — an
+in-memory checkpointer drops a pending approval on restart, which abandons the
+turn silently.
+
+```
+generate ── tool_request ──▶ plan ── effect=read  ──▶ act ──▶ generate
+                              │  └─ effect=write ──▶ approve ──▶ act
+                              └─ unknown/over budget ──▶ clarify
+```
+
+Four things here are load-bearing:
+
+**`generate` proposes nothing.** It emits a `TOOL name {json}` directive as its
+whole reply; `plan` is the only node that resolves one into a call. A directive
+is not an answer, so it never reaches `messages` and never ships as one.
+
+**`approve` does nothing before `interrupt()`.** A resume re-runs the node from
+its first line, so anything above that call happens twice. The effect lives in
+`act`, one edge later, which contains no `interrupt()` at all.
+
+**`act` refuses a `call_id` it already performed.** Belt and braces for the same
+replay hazard: a double-clicked approval must not send twice.
+
+**Tool output is evidence.** `act` merges the result into `retrieved` as a
+`tool://<name>/<call_id>` chunk with score `1.0`, so the ordinary citation gate
+applies to a tool-derived answer unchanged. A second grounding path would be free
+to drift from the first — the same argument as the single router above.
+
+`tool_request`, `pending_action` and `tool_calls` reset in `load_memory` with the
+rest of the per-turn state, which is what makes `TOOL_MAX_CALLS` a per-turn
+budget rather than a lifetime one for the thread.
+
+Known limitation: tools sit behind `generate`, so a turn whose retrieval was too
+weak goes to `clarify` and never gets the chance to ask for one. Actions that
+follow from retrieved content work; a bare "send this email" on an off-corpus
+thread does not.
 
 ## State contract
 
