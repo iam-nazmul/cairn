@@ -54,16 +54,21 @@ Every claim drawn from the evidence MUST carry its block's marker, e.g. [S1]. An
 answer with no marker is invalid. If the evidence does not support an answer, \
 say what is missing instead of guessing -- the researcher will be sent out again."""
 
-TOOLS_SYSTEM = """You can also perform actions by calling a tool.
+TOOLS_SYSTEM = """ACTIONS. Some requests ask you to DO something -- send, \
+schedule, create -- rather than to explain something. You cannot do those by \
+writing them out: text is not an action. To act you MUST start your reply with \
+this line and nothing before it:
 
-To call one, reply with a single line and nothing else:
+TOOL <name> <json>
 
-TOOL <name> {{"arg": "value"}}
-
-The arguments must be one JSON object. Do not explain the call, do not answer in \
-the same reply, and never claim an action is done unless a tool:// block below \
-shows it already ran -- such a block means that call has happened, so answer \
-from it instead of requesting it again.
+<name> is a tool from the list below and <json> is ONE JSON object whose keys \
+are exactly that tool's argument names, also from the list below. Do not invent \
+key names and do not wrap them in another object. Do not draft the thing in \
+prose instead, and \
+do not ask for permission -- you will be asked to confirm before anything \
+happens. Never claim an action is done unless a block below has a source \
+starting `tool://`: that means the call already ran, so answer from its result \
+instead of requesting it again.
 
 Available tools:
 {tools}"""
@@ -73,8 +78,10 @@ DECLINED_TEMPLATE = (
     "NOT happen. Say plainly what was not done. Do not offer to do it anyway."
 )
 
-# `TOOL <name> {json}` -- the whole reply, because a directive is not an answer.
-TOOL_RE = re.compile(r"\ATOOL\s+([A-Za-z_][A-Za-z0-9_]*)\s+(\{.*\})\s*\Z", re.S)
+# `TOOL <name> {json}` at the very start of the reply. Anchored there on
+# purpose: a model explaining what a tool does must not be read as asking to run
+# one, and only a reply that opens with the directive is asking.
+TOOL_RE = re.compile(r"\ATOOL\s+([A-Za-z_][A-Za-z0-9_]*)\s+(\{.*?\})\s*(?:\n|\Z)", re.S)
 
 _MAX_QUERY_CHARS = 200
 
@@ -128,14 +135,15 @@ def format_context(chunks: list[RetrievedChunk], max_chars: int) -> str:
 
 
 def format_tools(tools: Iterable[Tool]) -> str:
-    return "\n".join(f"- {t.signature()}: {t.description}" for t in tools)
+    return "\n".join(f"- {t.description}\n  TOOL {t.name} {t.arg_template()}" for t in tools)
 
 
 def parse_tool_request(reply: str) -> tuple[str, dict[str, Any]] | None:
     """Read a `TOOL name {json}` directive, or None if the reply is an answer.
 
-    Strict on purpose: the directive must be the entire reply, so an answer that
-    merely mentions a tool cannot be mistaken for a request to run one.
+    The directive must OPEN the reply; commentary a model adds after it is
+    ignored. Anchoring there is what keeps an answer that merely mentions a tool
+    from being read as a request to run one.
     """
     match = TOOL_RE.match(reply.strip())
     if match is None:

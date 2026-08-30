@@ -22,7 +22,7 @@ from src.api import routes
 from src.config import Context, Settings
 from src.graph.build import build_graph
 from src.graph.nodes import make_act
-from src.rag.prompts import cited_chunks
+from src.rag.prompts import cited_chunks, parse_tool_request
 from src.rag.retrieve import InMemoryVectorStore
 from src.tools.registry import Tool, ToolRegistry, build_registry
 from tests.conftest import make_runtime, make_state
@@ -203,6 +203,25 @@ async def test_a_read_tool_needs_no_approval() -> None:
     assert not result.get("__interrupt__"), "a read-effect tool must not stop the run"
     assert result["answer"]
     assert result["tool_calls"][0]["tool"] == "draft_email"
+
+
+def test_a_directive_may_be_followed_by_commentary() -> None:
+    """Models add a line explaining themselves; the call still stands."""
+    parsed = parse_tool_request(SEND + "\nI will send this once you approve.")
+
+    assert parsed is not None
+    assert parsed[0] == "send_email"
+
+
+def test_a_reply_that_merely_mentions_a_tool_is_not_a_request() -> None:
+    """Anchored at the start for exactly this: talking about an action is not
+    asking to take one."""
+    assert parse_tool_request(f"I could run this for you:\n{SEND}") is None
+    assert parse_tool_request("You can use TOOL send_email to do that.") is None
+
+
+def test_a_directive_with_unparseable_arguments_is_refused() -> None:
+    assert parse_tool_request('TOOL send_email {"to": "a@b.c", oops}') is None
 
 
 async def test_an_unclassified_tool_needs_approval() -> None:

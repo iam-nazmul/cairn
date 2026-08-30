@@ -250,8 +250,11 @@ preceded by `restart` if anything was drawn — the directive streams like an
 answer and is not one. An interrupt does not surface as a stream part, so the
 handler asks the checkpoint rather than trusting the stream.
 
-The browser UI does not implement the approval prompt; `TOOLS_ENABLED` is an API
-feature for now.
+The browser draws an approval card from the `interrupt` event: non-editable
+arguments as text, editable ones as inputs, Approve and Decline. It posts the
+decision to `/resume` and renders the finished turn. The composer is not blocked
+while a decision is open — the approval is addressed by `call_id`, not by being
+next in line.
 
 ## Citations come from two places
 

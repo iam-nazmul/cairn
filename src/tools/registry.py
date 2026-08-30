@@ -33,9 +33,14 @@ class Tool:
     def needs_approval(self) -> bool:
         return self.effect == "write"
 
-    def signature(self) -> str:
-        params = ", ".join(inspect.signature(self.run).parameters)
-        return f"{self.name}({params})"
+    def arg_template(self) -> str:
+        """The argument names as the JSON skeleton a caller must produce.
+
+        Deliberately not a Python signature: shown one, a model tends to reply
+        with a Python call, and the directive it must emit is JSON.
+        """
+        args = ", ".join(f'"{name}": "..."' for name in inspect.signature(self.run).parameters)
+        return "{" + args + "}"
 
     def validate(self, args: dict[str, Any]) -> bool:
         """Do these arguments actually call this tool? Checked before proposing."""

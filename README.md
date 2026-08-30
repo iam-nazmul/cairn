@@ -193,8 +193,13 @@ You can edit the fields listed in `editable` while approving — never the
 recipient, which is the difference between approving an action and authorising a
 different one. Declining performs nothing and tells you so. The request is parked
 on the conversation, so it survives a restart, and only the user who owns the
-conversation can decide it. This is API-only for now; the browser UI does not
-show the prompt.
+conversation can decide it.
+
+In the browser this appears as a card with Approve and Decline, with the editable
+fields as text boxes. Note that small local models follow the action format
+unreliably — llama3.1 often writes the email out instead of asking to send it.
+Nothing unsafe happens when it does; you simply get an answer rather than a
+prompt.
 
 ## What it remembers
 

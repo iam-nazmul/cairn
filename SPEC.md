@@ -569,8 +569,19 @@ cites nothing still routes to `clarify`.
   on an off-corpus thread does not. Moving the tool path in front of retrieval
   would let an action run with no evidence gathered at all, which is the trade
   §13 exists to refuse.
-- **No browser UI.** The approval prompt is an API-level feature in M6; the UI
-  ships `chat` and `agent` only.
+- **The directive is anchored, not whole-reply.** A model that adds a sentence
+  after the call is still asking for it; one that mentions a tool mid-answer is
+  not. The tool list is rendered as a JSON skeleton per tool, because a Python
+  signature teaches a model to reply with a Python call — measured, not assumed.
+- **Small local models comply unreliably.** llama3.1 emits the directive on some
+  runs and writes the action out as prose on others. It fails safe (no directive
+  is simply an answer), and the fix is a provider with native tool calling, which
+  would replace the directive and its parser without touching `plan` / `approve`
+  / `act`.
+- **The browser handles it.** An `interrupt` event draws an approval card: the
+  arguments as text, the editable fields as inputs, Approve and Decline. The
+  composer stays usable while a decision is open, because the approval is
+  addressed by `call_id` rather than by being next in line.
 
 ### 13.4 Researcher + writer — *implemented (M7)*
 

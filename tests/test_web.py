@@ -151,6 +151,9 @@ def test_every_data_hook_app_js_binds_to_exists() -> None:
         "data-delete-thread",
         "data-mode",
         "data-query",
+        "data-approve",
+        "data-decline",
+        "data-edits",
     ):
         assert hook in markup, f"{hook} missing from index.html"
         assert hook in script, f"{hook} missing from app.js"

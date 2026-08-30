@@ -37,6 +37,28 @@ human sees one action and authorises a different one. A test pins it.
 Nothing else changes. `plan` resolves any registered name, `route_after_plan`
 reads `effect`, and `act` performs it — none of them know your tool exists.
 
+## The directive, and what small models do with it
+
+`generate` asks for a whole-reply directive:
+
+```
+TOOL send_email {"to": "…", "subject": "…", "body": "…"}
+```
+
+`parse_tool_request` anchors at the **start** of the reply. Commentary after the
+directive is ignored; a reply that merely mentions a tool is not a request to run
+one. The tool list is rendered as a JSON skeleton per tool rather than a Python
+signature, because a model shown `send_email(to, subject, body)` replies with a
+Python call.
+
+**Small local models follow this unreliably.** Measured against llama3.1 on the
+sample corpus: it emitted a directive on some runs and wrote the email out as
+prose on others, and once produced malformed JSON. That degrades safely — no
+directive means no call, and the turn is an ordinary answer — but it means the
+approval flow is not something to demo on a 8B model and expect every time. The
+upgrade path is a provider with native tool calling, which replaces the directive
+and its parser without touching `plan`, `approve` or `act`.
+
 ## Transports
 
 `Transport` is a seam like `VectorStore` and `ChatModel`. `LoggingTransport` is
